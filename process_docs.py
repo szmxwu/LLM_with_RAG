@@ -246,7 +246,7 @@ if __name__ == '__main__':
 
     # pdf_page_to_image(pdf_path, page_number, image_path)
     file_path = 'F:\\big_pptx\\神经科特征性脑影像荟萃.pptx' # 替换为你的文件路径
-    result = split_pptx_with_images(file_path)
+    result = split_pptx(file_path)
     if isinstance(result, list):
         print("文件被拆分为以下文件：")
         for r in result:
