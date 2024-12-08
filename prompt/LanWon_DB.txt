@@ -1,0 +1,40 @@
+### 医生表（t_user）
+t_user记录医生身份信息。以下是该表中每个字段的含义：
+- `UserIdentity`: 整数类型，作为医生的唯一标识符。
+- `UserName`: 字符串类型，用于存储医生的中文名字。
+- `UserID`: 字符串类型，用于存储用户的登录名，由英文和数字组成。
+### 检查流程表（t_order）
+t_order记录患者在检查过程中的相关信息。以下是该表中每个字段的含义：
+- `PatientIdentity`: 整数类型，作为患者的唯一标识符，与t_patient表的PatientIdentity字段相关联。
+- `AccessionNumber`: 字符串类型，检查流水号，作为每次检查的唯一标识符。
+- `TotalFee`: 浮点类型，代表每次检查的总费用或者医院收入。
+- `AppliedDepartment`: 字符串类型，代表发起检查申请的科室名称。
+- `PatientType`: 字符串类型，代表患者类型，包括[住院,门诊,住院急诊,门诊急诊,绿色通道]五种类型。	
+- `ReportIdentity`: 整数类型，代表检查报告的唯一标识符，与t_report表的ReportIdentity字段相关联。
+- `Bodyparts`: 字符串类型，代表检查的部位项目名称。
+- `ModalityTypes`: 字符串类型，代表检查的设备类型名称，包括[DR,CT,MR,MG]四种类型。
+- `SequenceNo`: 字符串类型，代表执行检查的具体机器名称，由设备类型+数字组成，例如DR01,CT04。
+- `ReportIdentity`: 整数类型，作为检查报告的唯一标识符，与t_report表的ReportIdentity字段相关联。
+- `Appover`: 整数类型，作为审核医生/复审医生的唯一标识符，与t_user表的UserIdentity字段相关联。
+- `Reporter`: 整数类型，作为报告医生或初诊医生的唯一标识符，与t_user表的UserIdentity字段相关联。
+- `ReportIdentity`: 整数类型，作为检查报告的唯一标识符，与t_report表的ReportIdentity字段相关联。
+- `OrderCreateDate`: 时间戳类型，代表检查申请单开具的时间。
+- `UpdateDateTime`: 时间戳类型，代表患者进行检查的时间。
+- `ReportTime`: 时间戳类型，代表报告医生/初诊医生提交检查报告的时间。
+- `AppoveTime`: 时间戳类型，代表审核医生/复审医生提交检查报告的时间。
+### 检查报告表（t_report）
+t_report记录患者检查报告的相关信息。以下是该表中每个字段的含义：
+- `ReportIdentity`: 整数类型，作为患者的唯一标识符，与t_order表的ReportIdentity字段相关联。
+- `Finding`: 字符串类型，代表检查报告中的描述内容。
+- `Diagnose`: 字符串类型，代表检查报告中的结论内容。
+### 患者信息表（t_patient）
+t_patient记录患者个人信息。以下是该表中每个字段的含义：
+- `PatientIdentity`: 整数类型，作为患者的唯一标识符，与t_order表的PatientIdentity字段相关联。
+- `PatientID`: 字符串类型，代表患者的检查号码，非唯一值。
+- `PatientName`: 字符串类型，代表患者中文名字。
+- `PatientNameEn`: 字符串类型，代表患者英文名字。
+- `IdentityCardNumber`: 字符串类型，代表患者身份证号码。
+- `PatientGender`: 字符串类型，代表患者性别，包括[男,女]两种类型。
+- `BirthDate`: 时间戳类型，代表患者生日。
+- `Telephone`: 字符串类型，代表患者电话号码。
+- `UPID`: 整数类型，代表患者唯一主索引号。

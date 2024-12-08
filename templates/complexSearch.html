@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>高级查询</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/bootstrap.min.css') }}">
+    <style>
+        .container {
+            margin-top: 20px;
+        }
+        .form-inline {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .form-inline select, .form-inline input, .form-inline button {
+            margin-right: 10px;
+        }
+        .form-inline .minus-button {
+            display: none;
+        }
+        .form-inline:first-child .minus-button {
+            display: none;
+        }
+        .form-inline:not(:first-child) .minus-button {
+            display: inline-block;
+        }
+        .hidden {
+            display: none;
+        }
+        .table-container {
+            max-width: 100%;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+            white-space:normal;
+            word-wrap:break-word;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        th:nth-child(9),td:nth-child(9){
+            width:250px;
+        }
+        th:nth-child(11),td:nth-child(11),
+        th:nth-child(12),td:nth-child(12),
+        th:nth-child(13),td:nth-child(13){
+            width:450px;
+
+        }
+
+        .pagination {
+            margin-top: 10px;
+            text-align: center;
+        }
+        .pagination button {
+            margin: 10 20px;
+            padding: 15px 10px;
+        }
+        .progress {
+            margin-bottom: 20px;
+        }
+        .control-panel {
+            margin-bottom: 20px;
+        }
+    </style>
+    <script>
+        // 在页面加载时存储 user_id
+        document.addEventListener('DOMContentLoaded', function() {
+            localStorage.setItem('user_id', '{{ user_id }}');
+        });
+
+        // ... 其他 JavaScript 代码 ...
+
+        function submitForm() {
+            // ... 现有的 submitForm 代码 ...
+            
+            // 在发送请求时包含 user_id
+            fetch('/submit', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-ID': localStorage.getItem('user_id')
+                },
+                body: JSON.stringify(data)
+            })
+            // ... 其余代码保持不变 ...
+        }
+
+        function generateMatch() {
+            // ... 现有的 generateMatch 代码 ...
+            
+            // 在发送请求时包含 user_id
+            fetch('/generate', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-ID': localStorage.getItem('user_id')
+                },
+                body: JSON.stringify({ match_file: match_file })
+            })
+            // ... 其余代码保持不变 ...
+        }
+
+        function stopQuery() {
+            fetch('/stop_query', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-ID': localStorage.getItem('user_id')
+                }
+            })
+            // ... 其余代码保持不变 ...
+        }
+
+        function stopMatch() {
+            fetch('/stop_match', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-ID': localStorage.getItem('user_id')
+                }
+            })
+            // ... 其余代码保持不变 ...
+        }
+
+        // ... 其他 JavaScript 函数 ...
+    </script>
+</head>
+<body>
+    <div class="container">
+        <center><h1>人工智能符合率查询</h1></center><br><br>
+        <h2>请输入查询条件</h2>
+        <div id="conditions">
+            <div class="form-inline">
+                <select class="form-select" name="condition[]">
+                    <option value="设备类型">设备类型 (CT/MR/DR/MG/病理/超声/内镜)</option>
+                    <option value="检查部位">检查部位</option>
+                    <option value="诊断结论">诊断结论</option>
+                    <option value="诊断描述">诊断描述</option>
+                    <option value="检查机器">检查机器 (CT01/MR02)</option>
+                    <option value="性别">性别 (男/女)</option>
+                    <option value="年龄">年龄 (起始-结束)</option>
+                    <option value="申请科室">申请科室</option>
+                </select>
+                <input type="text" class="form-control" name="condition_value[]">
+                <button type="button" class="btn btn-secondary plus-button">+</button>
+                <button type="button" class="btn btn-secondary minus-button">-</button>
+            </div>
+        </div>
+
+        <h2>请输入时间范围</h2>
+        <div class="form-inline">
+            <label for="start_time" class="form-label">开始时间:</label>
+            <input type="date" id="start_time" name="start_time" class="form-control" required>
+        </div>
+        <div class="form-inline">
+            <label for="end_time" class="form-label">结束时间:</label>
+            <input type="date" id="end_time" name="end_time" class="form-control" required>
+        </div>
+
+        <h2>关联查询</h2>
+        <div class="form-inline">
+            <label for="type_select" class="form-label">选择类型:</label>
+            <select id="type_select" class="form-select" name="type_select">
+                <option value="病理">病理</option>
+                <option value="超声">超声</option>
+                <option value="超声">内镜</option>
+                <option value="CT">CT</option>
+                <option value="DR">DR</option>
+                <option value="MR">MR</option>
+                <option value="MG">MG</option>
+            </select>
+        </div>
+        <div class="form-inline">
+            <span>在主检索前</span>
+            <input type="number" id="before_days" name="before_days" class="form-control" min="0" placeholder="10" value="10" style="width: 80px;">
+            <span>天，后</span>
+            <input type="number" id="after_days" name="after_days" class="form-control" min="0" placeholder="60" value="60" style="width: 80px;">
+            <span>天进行关联检索</span>
+        </div>
+        <button type="button" id="query_button" class="btn btn-primary mt-3">查询</button>
+        <button type="button" id="match_button" class="hidden btn btn-primary mt-3" onclick="searchData()">智能匹配</button><br>
+        <span id="status_bar" ></span><br>
+        <div id="progress_container" class="hidden mt-3">
+            <div class="progress">
+                <div id="progress_bar" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+                    <span id="progress_text">0%<span>
+                </div>
+            </div>
+            <a id="download_link" href="#" class="hidden mt-3">下载文件</a><br>
+        </div>
+    </div>
+    
+    <div class="table-container">
+        <table id="data-table" class="table table-striped">
+            <thead></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+    <div class="hidden pagination" id="pagination">
+        <button onclick="firstPage()">第一页</button>
+        <button onclick="prevPage()">上一页</button>
+        <span id="page-info"></span>
+        <button onclick="nextPage()">下一页</button>
+        <button onclick="lastPage()">最后一页</button>
+    </div>
+    <script src="{{ url_for('static', filename='js/jquery.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/socket.io.min.js') }}"></script>
+    <script>
+        const table = document.getElementById('data-table');
+        function clearTableContent() {
+            // 遍历所有的行，从第二行开始（因为第一行为表头）
+            for (let i = 1; i < table.rows.length; i++) {
+                // 清除每一行的所有单元格数据
+                while(table.rows[i].cells.length) {
+                    table.rows[i].removeChild(table.rows[i].lastChild);
+                }
+            }
+        }
+
+        $(document).ready(function() {
+            // 监听条件输入框的变化
+            $(document).on('input', 'input[name="condition_value[]"]', function() {
+                // 获取当前选择的条件
+                var selectedCondition = $(this).closest('.form-inline').find('select').val();
+
+                // 仅当条件为"设备类型"时更新下拉选项
+                if (selectedCondition === "设备类型") {
+                    var inputValue = $(this).val();
+                    updateTypeSelectOptions(inputValue);
+                }
+            });
+
+            // 更新关联查询下拉选项
+            function updateTypeSelectOptions(inputValue) {
+                $('#type_select option').each(function() {
+                    var optionValue = $(this).val();
+                    if (optionValue === inputValue) {
+                        $(this).hide(); // 隐藏相同的选项
+                    } else {
+                        $(this).show(); // 显示不同的选项
+                    }
+                });
+            }
+            // Add new condition row
+            $(document).on('click', '.plus-button', function() {
+                var newRow = $(this).closest('.form-inline').clone();
+                newRow.find('select').val('');
+                newRow.find('input').val('');
+                $('#conditions').append(newRow);
+                updateButtons();
+            });
+
+            // Remove condition row
+            $(document).on('click', '.minus-button', function() {
+                $(this).closest('.form-inline').remove();
+                updateButtons();
+            });
+
+            // Update plus and minus buttons visibility
+            function updateButtons() {
+                $('.form-inline').each(function() {
+                    var totalRows = $('.form-inline').length;
+                    $(this).find('.minus-button').toggle(totalRows > 1);
+                });
+            }
+
+            updateButtons();
+
+
+
+            // Handle query button click
+            $('#query_button').on('click', function() {
+                if ($(this).text() === '查询') {
+                    function isValidDate(dateString) {
+                        var date = new Date(dateString);
+                        return (isNaN(date) ? false : true); // 如果返回NaN，则日期无效；如果能正确计算出日期，则日期有效。
+                    }
+                    if (!isValidDate($('#start_time').val())) {
+                        alert('错误的开始时间');
+                        return;
+                      }
+                    if (!isValidDate($('#end_time').val())) {
+                        alert('错误的结束时间');
+                        return;
+                        }
+
+                    var data = {
+                        type: $('#type_select').val(),
+                        conditions: [],
+                        start_time: $('#start_time').val(),
+                        end_time: $('#end_time').val(),
+                        before_days: $('#before_days').val(),
+                        after_days: $('#after_days').val(),
+                    };
+                    clearTableContent();
+                    $('#conditions .form-inline').each(function() {
+                        var condition = $(this).find('select').val();
+                        var condition_value = $(this).find('input').val();
+                        data.conditions.push({ condition: condition, value: condition_value });
+                    });
+
+                    // 校验条件是否为空
+                    var allEmpty = true;
+                    for (var i = 0; i < data.conditions.length; i++) {
+                        if (data.conditions[i].value.trim() !== '') {
+                            allEmpty = false;
+                            break;
+                        }
+                    }
+
+                    if (allEmpty) {
+                        alert('请至少输入一个条件');
+                        return;
+                    }
+                    // 校验主检索与相关检索是否相同
+                    for (var i = 0; i < data.conditions.length; i++) {
+                        if (data.conditions[i].condition=='设备类型' && data.conditions[i].value.trim() == data.type) {
+                            alert('主查询条件的设备类型与关联查询不能相同');
+                            return;
+                        }
+                    }
+
+
+                    // Show progress bar and start progress simulation
+                    $('#progress_container').removeClass('hidden');
+                    var progressBar = $('#progress_bar');
+                    var downloadLink = $('#download_link');
+                    var matchButton = $('#match_button');
+                    var paginationBar = $('#pagination');
+                    var statusBar = $('#status_bar');
+                    statusBar.text('正在查找与'+$('#type_select').val()+'的匹配结果');
+                    $.ajax({
+                        type: 'POST',
+                        url: '/submit',
+                        data: JSON.stringify(data),
+                        contentType: 'application/json',
+                        success: function(response) {
+                            var task_id = response.task_id;
+                            pollProgress(task_id);
+                        }
+                    });
+
+                    function pollProgress(task_id) {
+                        $.ajax({
+                            type: 'GET',
+                            url: '/progress/' + task_id,
+                            success: function(response) {
+                                var progress = response.progress;
+                                progressBar.css('width', progress + '%').attr('aria-valuenow', progress);
+                                var progressText=$('#progress_text');
+                                progressText.text(progress+'%');
+                                if (progress < 100) {
+                                    setTimeout(function() {
+                                        pollProgress(task_id);
+                                    }, 1000); // Poll every second
+                                } else {
+                                    if (response.file_url!==''){
+                                        downloadLink.attr('href', response.file_url).removeClass('hidden');
+                                        matchButton.removeClass('hidden');
+                                        paginationBar.removeClass('hidden');
+                                        statusBar.text('已经完成查找');
+                                    }else{
+                                        statusBar.text('未查询到结果');
+                                    }
+                                    $('#query_button').text('查询');
+                                }
+                            }
+                        });
+                    }
+                    $(this).text('停止查询');
+                } else {
+                    stopQuery();
+                }
+            });
+
+            function stopQuery() {
+                $.ajax({
+                    type: 'POST',
+                    url: '/stop_query',
+                    success: function(response) {
+                        $('#query_button').text('查询');
+                        $('#progress_bar').css('width', '0%').attr('aria-valuenow', 0);
+                        $('#progress_text').text('0%');
+                        $('#status_bar').text('查询已停止');
+                    }
+                });
+            }
+        });
+        var socket = io.connect('http://' + document.domain + ':' + location.port);
+        var data = [];
+        var currentPage = 1;
+        var rowsPerPage = 20;
+
+        function renderTable(page) {
+            var start = (page - 1) * rowsPerPage;
+            var end = start + rowsPerPage;
+            var paginatedData = data.slice(start, end);
+
+            var tableHead = $('#data-table thead');
+            var tableBody = $('#data-table tbody');
+            tableBody.empty();
+
+            if (paginatedData.length > 0) {
+                if (tableHead.is(':empty')) {
+                    var headerRow = '<tr>';
+                    for (var key in paginatedData[0]) {
+                        headerRow += '<th>' + key + '</th>';
+                    }
+                    headerRow += '</tr>';
+                    tableHead.append(headerRow);
+                }
+
+                paginatedData.forEach(function(row) {
+                    var dataRow = '<tr>';
+                    for (var key in row) {
+                        if (row[key]=='符合' || row[key]=='基本符合'){
+                            dataRow += '<td style="color: green;"><strong>' + row[key] + '</strong></td>';
+                        }else if(row[key]=='不符合'){
+                            dataRow += '<td style="color: red;"><strong>' + row[key] + '</strong></td>';
+                        }else {
+                            dataRow += '<td>' + row[key] + '</td>';
+                        }
+                        
+                    }
+                    dataRow += '</tr>';
+                    tableBody.append(dataRow);
+                });
+
+                updatePagination();
+            }
+        }
+
+        function updatePagination() {
+            var totalPages = Math.ceil(data.length / rowsPerPage);
+            $('#page-info').text('第 ' + currentPage + ' 页，共 ' + totalPages + ' 页');
+        }
+
+        function firstPage() {
+            currentPage = 1;
+            renderTable(currentPage);
+        }
+
+        function prevPage() {
+            if (currentPage > 1) {
+                currentPage--;
+                renderTable(currentPage);
+            }
+        }
+
+        function nextPage() {
+            var totalPages = Math.ceil(data.length / rowsPerPage);
+            if (currentPage < totalPages) {
+                currentPage++;
+                renderTable(currentPage);
+            }
+        }
+
+        function lastPage() {
+            currentPage = Math.ceil(data.length / rowsPerPage);
+            renderTable(currentPage);
+        }
+
+        function searchData() {
+            var matchButton = $('#match_button');
+            if (matchButton.text() === '智能匹配') {
+                var downloadLink = $('#download_link');
+                var statusBar = $('#status_bar');
+                statusBar.text('开始使用大模型计算符合率');
+                clearTableContent();
+                $.ajax({
+                    url: '/generate',
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({match_file:downloadLink.attr('href')}),
+                    success: function(response) {
+                        data = [];
+                        currentPage = 1;
+                        $('#progress_bar').css('width', '0%').attr('aria-valuenow', 0);
+                        $('#progress_text').text('0%');
+                    }
+                });
+                matchButton.text('停止匹配');
+            } else {
+                stopMatch();
+            }
+        }
+
+        function stopMatch() {
+            $.ajax({
+                url: '/stop_match',
+                type: 'POST',
+                success: function(response) {
+                    $('#match_button').text('智能匹配');
+                    $('#progress_bar').css('width', '0%').attr('aria-valuenow', 0);
+                    // $('#progress_text').text('0%');
+                    $('#status_bar').text('匹配正在停止');
+                }
+            });
+        }
+
+        socket.on('update', function(msg) {
+            data.push(msg.data);
+            renderTable(currentPage);
+            if (data.length % rowsPerPage === 1) {
+                updatePagination();
+            }
+
+            var progress = msg.progress;
+            var statusBar = $('#status_bar');
+            $('#progress_bar').css('width', progress + '%').attr('aria-valuenow', progress);
+            $('#progress_text').text(progress+'%');
+            if (progress>=100){
+                statusBar.text('已经完成匹配');
+                $('#match_button').text('智能匹配');
+            }
+        });
+
+        socket.on('finished', function(msg) {
+            var downloadLink = $('#download_link');
+            downloadLink.attr('href', msg.data).text("下载随访文件");
+            var statusBar = $('#status_bar');
+            statusBar.text('符合率为'+msg.percent+'%');
+            $('#match_button').text('智能匹配');
+        });
+
+
+    </script>
+</body>
+</html>

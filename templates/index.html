@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat Interface</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/bootstrap.min.css') }}">
+    <script src="{{ url_for('static', filename='js/marked.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/pdf.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/mammoth.browser.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/jquery.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/socket.io.min.js') }}"></script>
+    
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <img src="{{ url_for('static', filename='assistant_logo.png') }}" alt="Logo" class="logo">
+            <h3>知识助手</h3>
+            <p>通过本地知识库和大模型回答专业问题</p>
+            <div class="resize-handle"></div> <!-- Move resize-handle inside sidebar -->
+            <!-- Add file upload button -->
+            <input type="file" id="file-input" style="display: none;">
+            <button id="upload-button">上传文件</button>
+        </div>
+        <div class="chat-area">
+            <div id="chat-log" class="chat-log"></div>
+            <div class="input-area">
+                <textarea id="user-input" placeholder="输入你的问题..."></textarea>
+                <button id="send-button">发送</button>
+            </div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
