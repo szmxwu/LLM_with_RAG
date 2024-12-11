@@ -8,95 +8,33 @@ import io
 import zipfile
 import shutil
 from xml.etree import ElementTree as ET
-
-def extract_images_from_slide(slide_xml):
-    """提取幻灯片中引用的所有图像"""
-    images = set()  # 使用集合避免重复图像
-    tree = ET.ElementTree(ET.fromstring(slide_xml))
-    root = tree.getroot()
-    
-    # 遍历XML中所有的图像元素
-    for image in root.iter():
-        if 'blipFill' in image.tag:  # 这是图像的标签
-            for blip in image.iter():
-                print(blip.tag,blip.attrib)
-                #blip.attrib={'{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed': 'rId2'}
-                attrib=list(blip.attrib.keys())
-                if not attrib:
-                    continue
-                attrib=attrib[0]
-                if 'blip' in blip.tag and 'embed' in attrib:
-                    images.add(blip.attrib[attrib])  # 获取图像的引用
-    return images
-
-def split_pptx(file_path):
-    # 获取文件的大小（字节）
-    file_size = os.path.getsize(file_path)
-    
-    # 判断文件大小是否小于100MB
-    if file_size <= 100 * 1024 * 1024:
+from pathlib import Path
+import subprocess
+def split_pptx(file_path, max_size=100 * 1024 * 1024):
+    """
+    将超过100M的PPTX文件转换为pdf再分拆上传。
+    """
+    slide_size = os.path.getsize(file_path)
+    if slide_size <= max_size :
         return [file_path]
-    
-    # 获取文件名和扩展名
-    file_name, file_extension = os.path.splitext(file_path)
-    
-    # 创建拆分后的文件夹
-    output_folder = f"{file_name}_split"
-    os.makedirs(output_folder, exist_ok=True)
-    
-    # 解压pptx文件
-    with zipfile.ZipFile(file_path, 'r') as pptx_zip:
-        # 获取PPTX文件内部的所有文件
-        file_list = pptx_zip.namelist()
-        
-        # 拆分文件的索引
-        part_number = 1
-        current_size = 0
-        temp_files = []
-        
-        
-        # 创建新的Zip文件用于拆分
-        with zipfile.ZipFile(os.path.join(output_folder, f"{file_name}_{part_number}.pptx"), 'w') as current_zip:
-            image_references = set()  # 用于存储当前拆分文件需要的图像
-            
-            # 遍历文件列表，处理每个文件
-            for item in file_list:
-                # 检查文件是否为幻灯片（在ppt/slides/目录下）
-                if item.startswith('ppt/slides/'):
-                    # 获取幻灯片文件内容
-                    file_data = pptx_zip.read(item)
-                    slide_xml = file_data.decode('utf-8')  # 转换为字符串
-                    
-                    # 提取该幻灯片引用的所有图像
-                    slide_images = extract_images_from_slide(slide_xml)
-                    image_references.update(slide_images)  # 添加到当前拆分文件需要的图像集
-                
-                    # 将幻灯片文件写入当前zip文件
-                    current_zip.writestr(item, file_data)
-                    current_size += len(file_data)
-
-                # 处理图像文件（ppt/media/目录下）
-                elif item.startswith('ppt/media/') and item.split('/')[-1] in image_references:
-                    # 获取图像文件内容
-                    file_data = pptx_zip.read(item)
-                    # 将图像文件写入到当前拆分文件的ppt/media/文件夹中
-                    current_zip.writestr(item, file_data)
-                    current_size += len(file_data)
-
-            # 判断是否超出100MB
-            if current_size > 100 * 1024 * 1024:
-                # 关闭当前的Zip文件并开启一个新的
-                current_zip.close()
-                part_number += 1
-                current_size = 0
-                # part_folder = os.path.join(output_folder, f"{file_name}_{part_number}")
-                # os.makedirs(part_folder, exist_ok=True)
-                current_zip = zipfile.ZipFile(os.path.join(output_folder, f"{file_name}_{part_number}.pptx"), 'w')
-                
-            # 返回拆分后的文件路径列表
-        split_files = [os.path.join(output_folder, f"{file_name}_{i}.pptx") for i in range(1, part_number + 1)]
-    
-    return split_files
+    pdfpath="cache//"+os.path.splitext(os.path.basename(file_path))[0]+".pdf"
+    cmd=["soffice", "--headless", "--convert-to", "pdf:writer_pdf_Export",
+            file_path, "--outdir","cache"]
+    try:
+        subprocess.run(cmd,capture_output=True)
+    except Exception as e:
+        print(e)
+    if os.path.exists(pdfpath):
+        print("pdf convert succeeded.")
+        filepath=pdfpath
+    else:
+        print("pdf convert failed ")
+        return ""
+    slide_size = os.path.getsize(filepath)
+    if slide_size > max_size :     
+        return split_pdf(file_path)
+    else:
+        return [filepath]
 
 def split_pdf(file_path, max_size=100 * 1024 * 1024):
     # 获取文件名和扩展名
@@ -245,12 +183,6 @@ if __name__ == '__main__':
     # image_path = "output_page_2.png"
 
     # pdf_page_to_image(pdf_path, page_number, image_path)
-    file_path = 'F:\\big_pptx\\神经科特征性脑影像荟萃.pptx' # 替换为你的文件路径
+    file_path = 'F:\\big_pptx\\骨关节缺血坏死.pptx' # 替换为你的文件路径
     result = split_pptx(file_path)
-    if isinstance(result, list):
-        print("文件被拆分为以下文件：")
-        for r in result:
-            print(r)
-    else:
-        print("文件大小小于100MB，直接返回文件地址：", result)
-
+    print(result)

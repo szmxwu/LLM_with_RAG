@@ -1,4 +1,4 @@
-from ragflow_sdk import RAGFlow
+from ragflow_sdk import RAGFlow,Agent
 from dotenv import load_dotenv
 import os
 import pandas as pd
@@ -135,7 +135,7 @@ def List_documents(dataset_name,doc_id=None):
     dataset=dataset[0]
     return dataset.list_documents(
                         id=doc_id, 
-                        limit= 10000) 
+                        page_size= 10000) 
 
 def Delete_documents(dataset_name,doc_ids):
     """删除指定文档
@@ -194,23 +194,36 @@ def Stop_parsing(dataset_name,document_ids):
     dataset[0].async_cancel_parse_documents(document_ids)
     print("Async bulk parsing cancelled.")
 
-def Retrieve_chunks(question,dataset_name,top_k=8):
+def Retrieve_chunks(question,dataset_name,filename='',top_n=8):
     """检索知识库，获得语义最接近的文本片段
 
     Args:
         question (_type_): 问题
         dataset_name (_type_): 知识库名
+        filename:文件名
         top_k (_type_): 返回前k个结果
     """
     dataset = List_datasets(name=dataset_name)
     if not dataset:
         return f"can't find dataset {dataset_name}"
-    docs=ragflow.retrieve(question=question, dataset_ids=[dataset[0].id],  
-            similarity_threshold=0.4, top_k=8,
-            rerank_id=RERANK_ID
+    dataset=dataset[0]
+    docs=dataset.list_documents(page_size= 10000) 
+    if filename!='':
+        document_id=[d.id for d in docs if d.name==filename]
+        if not document_id:
+            print(f"未找到文档{filename}")
+    else:
+        document_id=None
+    docs=ragflow.retrieve(question=question, dataset_ids=[dataset.id],
+            document_ids=document_id,
+            similarity_threshold=0.2, 
+            rerank_id=RERANK_ID,
+            vector_similarity_weight=0.5
             )
     if len(docs)>0:
-        return [d.content for d in docs]
+        docs=docs[:top_n]
+        result=[d.content.replace("\\n","").replace("\n","").replace("\'","'") for d in docs]
+        return result
     else:
         return []
     
@@ -272,6 +285,15 @@ def Show_all_datasets():
         })
     return result
 
+
+def Agent_chat(question):
+    session = Agent.create_session(AGENT_ID,ragflow)    
+    response=session.ask(question, stream=True)
+    for ans in response:
+        result=ans.content
+    return result    
+    
+    
 def Show_all_docs(dataset_name):
     """页面管理第二层，点开知识库后，列出指定知识库的所有文档
     """
@@ -328,3 +350,4 @@ if __name__ == '__main__':
         for ans in session.ask(question, stream=True):
             print(ans.content[len(cont):], end='', flush=True)
             cont = ans.content
+        print(ans.reference)

@@ -1,4 +1,4 @@
-from RAGFLOW_SDK import Download_document,List_documents,Upload_documents,List_datasets,Create_dataset,Delete_documents,Parse_documents,Stop_parsing,Retrieve_chunks,Query_steam,BASE_URL
+from RAGFLOW_SDK import Download_document,List_documents,Upload_documents,List_datasets,Create_dataset,Delete_documents,Parse_documents,Stop_parsing,Retrieve_chunks,Query_steam,BASE_URL,Agent_chat
 from process_docs import pdf_page_to_image
 import re
 import os
@@ -67,7 +67,7 @@ history_messages=[]
 #读取预设提示词
 sql_prompt_file = load_prompt("prompt/sql_prompt.json",encoding='utf-8')
 match_prompt_file = load_prompt("prompt/match_prompt_template.json",encoding='utf-8')
-fig_prompt_file = load_prompt("prompt/fig_prompt_template.json",encoding='utf-8')
+# fig_prompt_file = load_prompt("prompt/fig_prompt_template.json",encoding='utf-8')
 judge_prompt_file = load_prompt("prompt/judge_prompt_template.json",encoding='utf-8')
 with open('prompt/fig_prompt.txt', 'r',encoding='utf-8') as file:
     fig_prompt = file.read()
@@ -92,9 +92,13 @@ def Query(question, chat_name, user_id=None):
     for ans in answer:
         print(ans.content[len(cont):], end='', flush=True)
         cont = ans.content
-    print("/n")
-    if ans.reference:
-        send_reference(ans.reference)
+    #仅保留被大模型选用的引文
+    print("\n")
+    inference_index=re.findall("##(\d)\$\$",cont)
+    if inference_index:
+        inference_index=[int(x) for x in inference_index]
+        send_reference([ans.reference[i] for i in inference_index if i < len(ans.reference)] ) 
+
 def send_reference(reference_chunks):
     """发送参考文献
 
@@ -124,10 +128,8 @@ def send_reference(reference_chunks):
     for index, chunk in enumerate(reference_chunks):
         extension = os.path.splitext(chunk['document_name'])[1]
         extension=extension[1:]
-        references += f"- [{index+1}] [{chunk['document_name']}]({BASE_URL}/document/{chunk['document_id']}?ext={extension}&prefix=document){chunk['page']},相似度:{chunk['similarity']:.2f}\n"
-        # http://192.0.0.193:6080/documents/ed466388b39a11efbbfa0242ac130006?ext=docx&prefix=document
-        # http://192.0.0.193:6080/document/ed466388b39a11efbbfa0242ac130006?ext=docx&prefix=document
         
+        references += f"- [{index+1}] [{chunk['document_name']}]({BASE_URL}/document/{chunk['document_id']}?ext={extension}&prefix=file){chunk['page']},相似度:{chunk['similarity']:.2f}\n"       
         if extension == "pdf":
             Thread(target=get_pdf_content,args=(
                 chunk['document_id'],
@@ -140,8 +142,8 @@ def send_reference(reference_chunks):
                 chunk['document_name'],
                 chunk['page']
             )).start()
-        elif extension == "docx":
-            Thread(target=get_docx_content,args=(
+        else:
+            Thread(target=get_other_content,args=(
                 chunk['document_name'],
                 chunk['content'],
                 chunk['image_id']
@@ -192,12 +194,15 @@ def get_ppt_content(doc_id,doc_name,page):
         img_path=pdf_page_to_image(filepath, p)
         #发送图片到gradio对话框 
         print(img_path)  
-def get_docx_content(filename,content_ltks,img_id):
+def get_other_content(filename,content_ltks,img_id):
+    """处理其他类型引文的显示"""
     time.sleep(0.3)
     content_ltks=content_ltks.replace("。","。<br>")
     content=f"<h3>{filename}</h3><br>{content_ltks}<br>"
+    #显示图片，特别重要
     if img_id:
-        content+=f'<img src="{BASE_URL[:-3]}document/image/{img_id}" alt="图片" style="width: 800px;height:auto;image-rendering: crisp-edges; "><br>'
+        content+=f'<img src="{BASE_URL}/v1/document/image/{img_id}" alt="图片" style="width: 800px;height:auto;image-rendering: crisp-edges; "><br>'
+        #这里地址拼接有问题，但是文档里没有找到相关内容
     #发送HTML到gradio对话框  
     print(content)   
 
@@ -210,10 +215,14 @@ def check_cache(filename):
 
 def get_LLM_SQL(question:str):
     """
-    使用llm把question转化为SQL，并分析是否可以可视化
+    首先调用ragflow查找最相似的examples来优化prompt，
+    然后使用llm把question转化为SQL
+    最后分析是否可以可视化
     """
     df=[]
-    prompt_str=sql_prompt_file.format(content=question)
+    #获得最接近的SQL示例
+    examples=Retrieve_chunks(question,'SQL',"rmyy_example.xlsx",3)
+    prompt_str=sql_prompt_file.format(content=question,examples=examples)
     # print(prompt_str)
     messages = [
         SystemMessage(content="你是一个SQL工程师，帮助用户编写SQL语言"),
@@ -258,6 +267,9 @@ def get_LLM_SQL(question:str):
             else:
                 sql_str=parseStr
             print(f"SQL错误，正在进行第{n+1}次重试")
+    print("sql_str=",sql_str)
+    print(df)
+    print("正在尝试绘图")
     messages.extend([
         AIMessage(content=sql_str),
         HumanMessage(content=fig_prompt),
@@ -265,7 +277,7 @@ def get_LLM_SQL(question:str):
     ## 输出解析
     result = llm.invoke(messages)
     parseStr = parser.invoke(result)
-    print(parseStr)
+    # print(parseStr)
     try:
         mat=re.search(r"\s\[.*?\]",parseStr,re.DOTALL | re.MULTILINE |re.I)
         if mat:
@@ -410,10 +422,21 @@ def judge_question(question):
             print(f"判断错误，正在进行第{n+1}次重试")
     
 
+
 if __name__ == '__main__':
-    question="内耳的解剖结构"
+    question="冗长神经根"
     chat_name="小影"
+    dataset_name="放射学"
     Query(question,chat_name)
+    # sql_question="自2000年以来美国、加拿大、墨西哥的人口情况"
+    # result=Retrieve_chunks(sql_question,'SQL',3)
+
+    # print([r.replace("\\n","") for r in result])
+    
+    # question="统计最近三个月的MRI检查总人数"
+    # print(get_LLM_SQL(question))
+    # sql_question="自2000年以来美国、加拿大、墨西哥的人口情况"
+    # print(Agent_chat(sql_question))
     # filename_list=['F:\\big_pptx\\骨关节缺血坏死.pptx']
     # Upload_documents("放射学",filename_list)
 #     radology_result="""

@@ -51,25 +51,12 @@ prompt_str = """
 - 输出符合SQL SERVER语法的SQL语句，请务必不要使用mysql的语法，例如limit
 
 ### 示例:
-- 需求: 统计最近三个月的CT检查总收入，每个月分开统计
-- 输出: SELECT DATEPART(MONTH, StudyDateTime) AS Month, SUM(Charge) AS TotalCharge FROM tAllReportInfo WHERE DATEPART(YEAR, StudyDateTime) = YEAR(GETDATE()) AND
-   DATEPART(MONTH, StudyDateTime) IN (MONTH(GETDATE()) - 2, MONTH(GETDATE()) - 1, MONTH(GETDATE())) AND 
-   ModalityType ='CT' AND ModalityName NOT LIKE 'LH%'" 
-   GROUP BY
-   DATEPART(MONTH, StudyDateTime)
-- 需求: 统计最近三个月体检患者费用占全部费用的百分比，按月分开统计
-- 输出: SELECT  DATEPART(MONTH, StudyDateTime) AS Month, 
-   SUM(Charge) AS TotalCharge,
-   (SUM(CASE WHEN PatientType = '体检' THEN Charge ELSE 0 END) / SUM(Charge)) * 100 AS PercentageOfTotal
-   FROM tAllReportInfo WHERE StudyDateTime >= DATEADD(MONTH, -3, GETDATE()) AND
-   ModalityType IN ('CT', 'DR', 'MR', 'MG') AND
-   ModalityName NOT LIKE 'LH%'
-   GROUP BY DATEPART(MONTH, StudyDateTime);
+{examples}
 
 """
 prompt_file = {
     "_type": "prompt",
-    "input_variables": ["content"],
+    "input_variables": ["content","examples"],
     "template": prompt_str}
 with open('prompt/sql_prompt.json', 'w', encoding='utf-8') as f:
     f.write(json.dumps(prompt_file, ensure_ascii=False))
