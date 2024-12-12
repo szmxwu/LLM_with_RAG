@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 warnings.filterwarnings('ignore')
 load_dotenv()
 # 访问环境变量
+PATH_MATCH_REPLACE_FILE = 'documents/match_replace.xlsx'
 LLM_NAME = os.getenv('LLM_NAME')
 XINFERENCE=os.getenv('XINFERENCE')
 ODBC=os.getenv('ODBC')
@@ -42,7 +43,7 @@ connectionString = conf.get("sqlQuery","connectionString")
 inteEngine = sql.create_engine(connectionString)
 
 # 文本词汇清洗
-match_replace = pd.read_excel('match_replace.xlsx', sheet_name=0).to_dict('records')
+match_replace = pd.read_excel(PATH_MATCH_REPLACE_FILE, sheet_name=0).to_dict('records')
 #连接数据库
 connectionString = ODBC
 engine = sql.create_engine(connectionString)

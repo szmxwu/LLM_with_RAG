@@ -100,10 +100,11 @@ sole_words = conf.get("positive", "sole_words")
 deny_words = conf.get("positive", "deny_words")
 spine_words = conf.get("clean", "spine")
 dualparts=conf.get("orientation", "dualparts")
-
+PATH_REPLACE_FILE = "documents/replace.xlsx"
+PATH_HAND_DICT_FILE = "documents/hand_dict.xlsx"
 
 # 部位知识图谱
-bodypartsknowledgegraph = pd.read_excel("报告助手部位词典.xlsx", sheet_name=0)
+bodypartsknowledgegraph = pd.read_excel(PATH_HAND_DICT_FILE, sheet_name=0)
 knowledgegraph = []
 firstlevel = set(bodypartsknowledgegraph["分类"].tolist())
 for firtpart in firstlevel:
@@ -111,7 +112,7 @@ for firtpart in firstlevel:
     knowledgegraph.append(GetLevelDic(temp))
 
 # 标题知识图谱
-titlePartsKnowledgegraph = pd.read_excel("报告助手部位词典.xlsx", sheet_name=1)
+titlePartsKnowledgegraph = pd.read_excel(PATH_HAND_DICT_FILE, sheet_name=1)
 title_knowledgegraph = []
 title_firstlevel = set(titlePartsKnowledgegraph["分类"].tolist())
 for title_firtpart in title_firstlevel:
@@ -119,15 +120,15 @@ for title_firtpart in title_firstlevel:
                                     == title_firtpart]
     title_knowledgegraph.append(GetLevelDic(temp))
 # 报告词汇清洗
-ReplaceTable = pd.read_excel('replace.xlsx', sheet_name=0).to_dict('records')
+ReplaceTable = pd.read_excel(PATH_REPLACE_FILE, sheet_name=0).to_dict('records')
 # 检查部位词汇清洗
 PartReplaceTable = pd.read_excel(
-    'replace.xlsx', sheet_name=1).to_dict('records')
+    PATH_REPLACE_FILE, sheet_name=1).to_dict('records')
 ConditionReplaceTable = pd.read_excel(
-    'replace.xlsx', sheet_name=2).to_dict('records')
+    PATH_REPLACE_FILE, sheet_name=2).to_dict('records')
 
 #正常测量值
-nomalMeasure = pd.read_excel("报告助手部位词典.xlsx", sheet_name=2)
+nomalMeasure = pd.read_excel(PATH_HAND_DICT_FILE, sheet_name=2)
 
 #文本词还原
 pattern1=re.compile(r'([^颈胸腰骶尾])(\d{1,2})[、|,|，|及|和](\d{1,2})([颈|胸|腰|骶|尾])(?!.*段)',flags=re.I)
