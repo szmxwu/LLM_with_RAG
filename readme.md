@@ -1,3 +1,5 @@
+# LLM_with_RAG
+原大模型功能集成到一个项目中
 ## llm_func文件
 - 大模型处理的函数集，包括意图判断，text2sql，符合率匹配，RAG四大类功能
 ## RAGFLOW_SDK文件
