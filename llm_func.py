@@ -1,4 +1,4 @@
-from RAGFLOW_SDK import Download_document,List_documents,Upload_documents,List_datasets,Create_dataset,Delete_documents,Parse_documents,Stop_parsing,Retrieve_chunks,Query_steam,BASE_URL,Agent_chat
+from RAGFLOW_SDK import Download_document,List_documents,Upload_documents,List_datasets,Create_dataset,Delete_documents,Parse_documents,Stop_parsing,Retrieve_chunks,Query_steam,BASE_URL,Agent_chat,Show_all_datasets,Show_all_docs
 from process_docs import pdf_page_to_image
 import re
 import os
@@ -39,8 +39,8 @@ EMBEDDING=os.getenv('EMBEDDING')
 CACHE_DIR = 'cache'
 conf = configparser.ConfigParser()
 conf.read('system_config.ini',encoding="utf-8")
-connectionString = conf.get("sqlQuery","connectionString")
-inteEngine = sql.create_engine(connectionString)
+# connectionString = conf.get("sqlQuery","connectionString")
+# inteEngine = sql.create_engine(connectionString)
 
 # 文本词汇清洗
 match_replace = pd.read_excel(PATH_MATCH_REPLACE_FILE, sheet_name=0).to_dict('records')
@@ -91,14 +91,19 @@ def Query(question, chat_name, user_id=None):
     answer = Query_steam(question, chat_name, user_id)
     cont = ""
     for ans in answer:
-        print(ans.content[len(cont):], end='', flush=True)
+        if ans.content[len(cont):] not in cont:
+            print(ans.content[len(cont):], end='', flush=True)
         cont = ans.content
-    #仅保留被大模型选用的引文
+    #保留被大模型选用的引文或者包含图片的
     print("\n")
-    inference_index=re.findall("##(\d)\$\$",cont)
+    inference_index=re.findall("##(\d)\$\$",ans.content)
     if inference_index:
         inference_index=[int(x) for x in inference_index]
-        send_reference([ans.reference[i] for i in inference_index if i < len(ans.reference)] ) 
+    inference=[]
+    for index,ref in enumerate(ans.reference):
+        if (index in inference_index) or len(ref["image_id"])>0:
+            inference.append(ref)
+    send_reference(inference) 
 
 def send_reference(reference_chunks):
     """发送参考文献
@@ -118,19 +123,18 @@ def send_reference(reference_chunks):
             doc['page']=list(set([int(x[0]) for x in doc['positions']]))
         except:
             doc['page']=[]
-        key=(doc['document_name'],doc['document_id'])
-        if key not in merged_docs:
-            merged_docs[key]=doc
+        if doc['id'] not in merged_docs or doc['page']==[]:
+            merged_docs[doc['id']]=doc
         else:
-            merged_docs[key]['page'].extend(doc['page'])
-            merged_docs[key]['page']=sorted(list(set(merged_docs[key]['page'])))
+            merged_docs[doc['id']]['page'].extend(doc['page'])
+            merged_docs[doc['id']]['page']=sorted(list(set(merged_docs[key]['page'])))
     reference_chunks=[value for value in merged_docs.values()]
     references = "### 参考文献\n"
     for index, chunk in enumerate(reference_chunks):
         extension = os.path.splitext(chunk['document_name'])[1]
         extension=extension[1:]
         
-        references += f"- [{index+1}] [{chunk['document_name']}]({BASE_URL}/document/{chunk['document_id']}?ext={extension}&prefix=file){chunk['page']},相似度:{chunk['similarity']:.2f}\n"       
+        references += f"- [{index+1}] [{chunk['document_name']}]({BASE_URL}/document/{chunk['document_id']}?ext={extension}&prefix=document){chunk['page']}\n"       
         if extension == "pdf":
             Thread(target=get_pdf_content,args=(
                 chunk['document_id'],
@@ -222,7 +226,9 @@ def get_LLM_SQL(question:str):
     """
     df=[]
     #获得最接近的SQL示例
-    examples=Retrieve_chunks(question,'SQL',"rmyy_example.xlsx",3)
+    examples=Retrieve_chunks(question,'SQL',"rmyy_DB.xlsx",3)
+    print("example:",[re.findall("问题：(.*?)回答",d) for d in examples])
+    examples="\n\n".join(examples)
     prompt_str=sql_prompt_file.format(content=question,examples=examples)
     # print(prompt_str)
     messages = [
@@ -267,10 +273,11 @@ def get_LLM_SQL(question:str):
                 sql_str=mat.group(1)
             else:
                 sql_str=parseStr
+            print(parseStr)
             print(f"SQL错误，正在进行第{n+1}次重试")
-    print("sql_str=",sql_str)
-    print(df)
-    print("正在尝试绘图")
+    # print("sql_str=",sql_str)
+    # print(df)
+    # print("正在尝试绘图")
     messages.extend([
         AIMessage(content=sql_str),
         HumanMessage(content=fig_prompt),
@@ -290,24 +297,9 @@ def get_LLM_SQL(question:str):
     except:
         parseStr=[]
 
-    return parseStr, sql_str,df
+    return sql_str,parseStr,df
 
-# def read_example_emmbedding(file_path):
-#     with open(file_path, 'r') as f:
-#         corpus=f.readlines()
-#     return corpus,[embedder.embed_query(sentence) for sentence in corpus]
 
-# examples,example_embeddings = read_example_emmbedding("examples.txt")
-# def find_most_similar(query:str, examples, K:int):
-#     """查找最相似的例子
-#     """
-#     # 将用户输入转化为向量
-#     query_embedding = embedder.embed_query(query)
-#     # 计算查询向量与语料库中每个句子向量的余弦相似度
-#     similarities = cosine_similarity([query_embedding], example_embeddings)[0]
-#     # 找到相似度最高的句子的索引
-#     most_similar_indices = np.argsort(similarities)[-K:][::-1]
-#     # 返回语料库中相似度最高的句子
 #     return [examples[i] for i in most_similar_indices]
 def clean_html(text):
     """清洗HTML标签"""
@@ -404,42 +396,35 @@ def judge_question(question):
     ]
     ## 输出解析
     answer= llm.invoke(messages,config={"max_tokens": 1024}).content
-    for n in range(5):
-        try:
-            result = ast.literal_eval(answer)
-            return result
-        except Exception as e:
-            error_message=f"""
-            以上输出经过ast.literal_eval解析时出错，请修改后再次输出。错误信息：
-            ```
-            {e.orig}
-            ```
-            """
-            messages.extend([
-                AIMessage(content=answer),
-                HumanMessage(content=error_message),   
-            ])
-            answer = llm.invoke(messages).content
-            print(f"判断错误，正在进行第{n+1}次重试")
     
+    try:
+        result = ast.literal_eval(answer)
+        return result
+    except:
+        return answer
+
 
 
 if __name__ == '__main__':
-    question="冗长神经根"
+    question="阻生牙"
     chat_name="小影"
     dataset_name="放射学"
+    # print(Show_all_docs(dataset_name))
     Query(question,chat_name)
-    # sql_question="自2000年以来美国、加拿大、墨西哥的人口情况"
-    # result=Retrieve_chunks(sql_question,'SQL',3)
+    # sql_question="统计2024年11月CT检查类型中，各机器检查的人次数量"
+    # result=Retrieve_chunks(sql_question,'SQL',top_n=2)
 
     # print([r.replace("\\n","") for r in result])
-    
+    # result=get_LLM_SQL(sql_question)
+    # print(result)
     # question="统计最近三个月的MRI检查总人数"
     # print(get_LLM_SQL(question))
     # sql_question="自2000年以来美国、加拿大、墨西哥的人口情况"
     # print(Agent_chat(sql_question))
-    # filename_list=['F:\\big_pptx\\骨关节缺血坏死.pptx']
+    # filename_list=['F:\\big_pptx\\髋关节常见病变MR诊断.pptx']
+    # filename_list=["H:\\output_directory\\pdf\\肿瘤影像诊断图谱.pdf"]
     # Upload_documents("放射学",filename_list)
+    # Parse_documents("放射学")
 #     radology_result="""
 # 1.双肺多发磨玻璃、实性结节，大致同前相仿，随访；前上纵隔小结节基本同前相仿。
 # 2.右肾切除术后改变，术区未见明确复发征象；腹膜后及肠系膜见数枚稍大淋巴结，以上均同前相仿；盆腔少量积液，较前略增多。
