@@ -96,14 +96,14 @@ def Query(question, chat_name, user_id=None):
         cont = ans.content
     #保留被大模型选用的引文或者包含图片的
     print("\n")
-    inference_index=re.findall("##(\d)\$\$",ans.content)
-    if inference_index:
-        inference_index=[int(x) for x in inference_index]
-    inference=[]
+    reference_index=re.findall("##(\d)\$\$",ans.content)
+    if reference_index:
+        reference_index=[int(x) for x in reference_index]
+    reference=[]
     for index,ref in enumerate(ans.reference):
-        if (index in inference_index) or len(ref["image_id"])>0:
-            inference.append(ref)
-    send_reference(inference) 
+        if (index in reference_index) or len(ref["image_id"])>0:
+            reference.append(ref)
+    send_reference(reference) 
 
 def send_reference(reference_chunks):
     """发送参考文献
@@ -123,18 +123,26 @@ def send_reference(reference_chunks):
             doc['page']=list(set([int(x[0]) for x in doc['positions']]))
         except:
             doc['page']=[]
-        if doc['id'] not in merged_docs or doc['page']==[]:
-            merged_docs[doc['id']]=doc
+        if doc['document_id'] not in merged_docs or doc['page']==[]:
+            merged_docs[doc['document_id']]=doc
         else:
-            merged_docs[doc['id']]['page'].extend(doc['page'])
-            merged_docs[doc['id']]['page']=sorted(list(set(merged_docs[key]['page'])))
+            merged_docs[doc['document_id']]['page'].extend(doc['page'])
+            merged_docs[doc['document_id']]['page']=sorted(list(set(merged_docs[doc['document_id']]['page'])))
     reference_chunks=[value for value in merged_docs.values()]
     references = "### 参考文献\n"
-    for index, chunk in enumerate(reference_chunks):
+    index=1
+    for chunk in reference_chunks:
         extension = os.path.splitext(chunk['document_name'])[1]
         extension=extension[1:]
-        
-        references += f"- [{index+1}] [{chunk['document_name']}]({BASE_URL}/document/{chunk['document_id']}?ext={extension}&prefix=document){chunk['page']}\n"       
+        if chunk['document_id'] not in references:
+            file_extension = os.path.splitext(os.path.basename(chunk['document_name']))[1]
+            if file_extension in ['.xlsx','.xls','.ppt','.pptx']:
+                #以上文件类型为下载链接
+                references += f"- [{index}] [{chunk['document_name']}]({BASE_URL}/v1/document/get/{chunk['document_id']}){chunk['page']}\n"
+            else:
+                #以上文件类型为预览链接
+                references += f"- [{index}] [{chunk['document_name']}]({BASE_URL}/document/{chunk['document_id']}?ext={extension}&prefix=document){chunk['page']}\n"
+            index+=1       
         if extension == "pdf":
             Thread(target=get_pdf_content,args=(
                 chunk['document_id'],
@@ -406,7 +414,7 @@ def judge_question(question):
 
 
 if __name__ == '__main__':
-    question="阻生牙"
+    question="支气管肺发育不良诊断标准"
     chat_name="小影"
     dataset_name="放射学"
     # print(Show_all_docs(dataset_name))
