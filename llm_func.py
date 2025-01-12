@@ -1,4 +1,4 @@
-from RAGFLOW_SDK import Download_document,List_documents,Upload_documents,List_datasets,Create_dataset,Delete_documents,Parse_documents,Stop_parsing,Retrieve_chunks,Query_steam,BASE_URL,Agent_chat,Show_all_datasets,Show_all_docs
+from RAGFLOW_SDK import Download_document, List_documents, Upload_documents, List_datasets, Create_dataset, Delete_documents, Parse_documents, Stop_parsing, Retrieve_chunks, Query_steam, BASE_URL, Agent_chat, Show_all_datasets, Show_all_docs
 from process_docs import pdf_page_to_image
 import re
 import os
@@ -9,7 +9,7 @@ import subprocess
 import uuid
 import gradio
 import re
-import pandas as pd 
+import pandas as pd
 import numpy as np
 import warnings
 from pprint import pprint
@@ -18,7 +18,7 @@ import sqlalchemy as sql
 from keyword_extraction import get_orientation_position
 import configparser
 from sklearn.metrics.pairwise import cosine_similarity
-from langchain_core.messages import HumanMessage, SystemMessage,AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain.prompts import load_prompt
 from langchain_openai import ChatOpenAI
@@ -32,48 +32,48 @@ load_dotenv()
 # 访问环境变量
 PATH_MATCH_REPLACE_FILE = 'documents/match_replace.xlsx'
 LLM_NAME = os.getenv('LLM_NAME')
-XINFERENCE=os.getenv('XINFERENCE')
-ODBC=os.getenv('ODBC')
-RERANK_ID=os.getenv('RERANK_ID')
-EMBEDDING=os.getenv('EMBEDDING')
+XINFERENCE = os.getenv('XINFERENCE')
+ODBC = os.getenv('ODBC')
+RERANK_ID = os.getenv('RERANK_ID')
+EMBEDDING = os.getenv('EMBEDDING')
 CACHE_DIR = 'cache'
 conf = configparser.ConfigParser()
-conf.read('system_config.ini',encoding="utf-8")
+conf.read('system_config.ini', encoding="utf-8")
 # connectionString = conf.get("sqlQuery","connectionString")
 # inteEngine = sql.create_engine(connectionString)
 
 # 文本词汇清洗
-match_replace = pd.read_excel(PATH_MATCH_REPLACE_FILE, sheet_name=0).to_dict('records')
-#连接数据库
+match_replace = pd.read_excel(
+    PATH_MATCH_REPLACE_FILE, sheet_name=0).to_dict('records')
+# 连接数据库
 connectionString = ODBC
 engine = sql.create_engine(connectionString)
-#连接大模型
+# 连接大模型
 llm = ChatOpenAI(
-            base_url=XINFERENCE,
-            model=LLM_NAME,
-            api_key="EMPTY",
-    )
+    base_url=XINFERENCE,
+    model=LLM_NAME,
+    api_key="EMPTY",
+)
 
 
-
-embedder=XinferenceEmbeddings(
+embedder = XinferenceEmbeddings(
     server_url=XINFERENCE,
     model_uid=EMBEDDING
 )
 
-#建立大模型临时记忆
-history_messages=[]
+# 建立大模型临时记忆
+history_messages = []
 
 
-#读取预设提示词
-sql_prompt_file = load_prompt("prompt/sql_prompt.json",encoding='utf-8')
-match_prompt_file = load_prompt("prompt/match_prompt_template.json",encoding='utf-8')
+# 读取预设提示词
+sql_prompt_file = load_prompt("prompt/sql_prompt.json", encoding='utf-8')
+match_prompt_file = load_prompt(
+    "prompt/match_prompt_template.json", encoding='utf-8')
 # fig_prompt_file = load_prompt("prompt/fig_prompt_template.json",encoding='utf-8')
-judge_prompt_file = load_prompt("prompt/judge_prompt_template.json",encoding='utf-8')
-with open('prompt/fig_prompt.txt', 'r',encoding='utf-8') as file:
+judge_prompt_file = load_prompt(
+    "prompt/judge_prompt_template.json", encoding='utf-8')
+with open('prompt/fig_prompt.txt', 'r', encoding='utf-8') as file:
     fig_prompt = file.read()
-
-
 
 
 def Query(question, chat_name, user_id=None):
@@ -94,16 +94,47 @@ def Query(question, chat_name, user_id=None):
         if ans.content[len(cont):] not in cont:
             print(ans.content[len(cont):], end='', flush=True)
         cont = ans.content
-    #保留被大模型选用的引文或者包含图片的
+    # 根据回答内容，生成病例检索关键词
+    Thread(target=generate_probe, args=(answer,)).start()
+    # 保留被大模型选用的引文或者包含图片的
     print("\n")
-    reference_index=re.findall("##(\d)\$\$",ans.content)
+    reference_index = re.findall("##(\d)\$\$", ans.content)
     if reference_index:
-        reference_index=[int(x) for x in reference_index]
-    reference=[]
-    for index,ref in enumerate(ans.reference):
-        if (index in reference_index) or len(ref["image_id"])>0:
+        reference_index = [int(x) for x in reference_index]
+    reference = []
+    for index, ref in enumerate(ans.reference):
+        if (index in reference_index) or len(ref["image_id"]) > 0:
             reference.append(ref)
-    send_reference(reference) 
+    send_reference(reference)
+
+
+def generate_probe(answer):
+    """
+    生成追问关键词，用于查询病例库
+    """
+    with open('prompt/probe_prompt.txt', 'r', encoding='utf-8') as file:
+        probe_prompt = file.read()
+    probe_prompt = probe_prompt.replace("{answer}", answer)
+    parser = StrOutputParser()
+    keywords = parser.invoke(llm.invoke(probe_prompt))
+    # 将关键词返回显示在界面的回答下方，用户可点击关键词进行搜索
+    return keywords
+
+
+def search_case(keywords):
+    """
+    根据关键词搜索病例库
+    弹出新的页面，用列表+图像展示病例，注意文档中的图片URL是相对路径，需要转换为绝对路径
+    """
+    cases = Retrieve_chunks(keywords, '病例', "", 20)
+    result = []
+    if cases:
+        result.append({
+            "书籍标题": cases.document_name,
+            "内容": cases.content,
+        })
+    return result
+
 
 def send_reference(reference_chunks):
     """发送参考文献
@@ -116,108 +147,115 @@ def send_reference(reference_chunks):
     """
     if not reference_chunks:
         return None
-    #合并同一文件的多个页码
-    merged_docs={}
+    # 合并同一文件的多个页码
+    merged_docs = {}
     for doc in reference_chunks:
         try:
-            doc['page']=list(set([int(x[0]) for x in doc['positions']]))
+            doc['page'] = list(set([int(x[0]) for x in doc['positions']]))
         except:
-            doc['page']=[]
-        if doc['document_id'] not in merged_docs or doc['page']==[]:
-            merged_docs[doc['document_id']]=doc
+            doc['page'] = []
+        if doc['document_id'] not in merged_docs or doc['page'] == []:
+            merged_docs[doc['document_id']] = doc
         else:
             merged_docs[doc['document_id']]['page'].extend(doc['page'])
-            merged_docs[doc['document_id']]['page']=sorted(list(set(merged_docs[doc['document_id']]['page'])))
-    reference_chunks=[value for value in merged_docs.values()]
+            merged_docs[doc['document_id']]['page'] = sorted(
+                list(set(merged_docs[doc['document_id']]['page'])))
+    reference_chunks = [value for value in merged_docs.values()]
     references = "### 参考文献\n"
-    index=1
+    index = 1
     for chunk in reference_chunks:
         extension = os.path.splitext(chunk['document_name'])[1]
-        extension=extension[1:]
+        extension = extension[1:]
         if chunk['document_id'] not in references:
-            file_extension = os.path.splitext(os.path.basename(chunk['document_name']))[1]
-            if file_extension in ['.xlsx','.xls','.ppt','.pptx']:
-                #以上文件类型为下载链接
+            file_extension = os.path.splitext(
+                os.path.basename(chunk['document_name']))[1]
+            if file_extension in ['.xlsx', '.xls', '.ppt', '.pptx']:
+                # 以上文件类型为下载链接
                 references += f"- [{index}] [{chunk['document_name']}]({BASE_URL}/v1/document/get/{chunk['document_id']}){chunk['page']}\n"
             else:
-                #以上文件类型为预览链接
+                # 以上文件类型为预览链接
                 references += f"- [{index}] [{chunk['document_name']}]({BASE_URL}/document/{chunk['document_id']}?ext={extension}&prefix=document){chunk['page']}\n"
-            index+=1       
+            index += 1
         if extension == "pdf":
-            Thread(target=get_pdf_content,args=(
+            Thread(target=get_pdf_content, args=(
                 chunk['document_id'],
                 chunk['document_name'],
                 chunk['page']
             )).start()
         elif extension == "pptx":
-            Thread(target=get_ppt_content,args=(
+            Thread(target=get_ppt_content, args=(
                 chunk['document_id'],
                 chunk['document_name'],
                 chunk['page']
             )).start()
         else:
-            Thread(target=get_other_content,args=(
+            Thread(target=get_other_content, args=(
                 chunk['document_name'],
                 chunk['content'],
                 chunk['image_id']
             )).start()
     print(references)
-def get_pdf_content(doc_id,doc_name,page):   
+
+
+def get_pdf_content(doc_id, doc_name, page):
     exists, filepath = check_cache(doc_name)
     if not exists:
         print("Downloading file...")
-        filepath = Download_document(doc_id,doc_name)
+        filepath = Download_document(doc_id, doc_name)
     else:
         print(f"{doc_name} is in cache")
     for p in page:
-        #把页面转化为图片
-        img_path=pdf_page_to_image(filepath, p)
-        #发送图片到gradio对话框
+        # 把页面转化为图片
+        img_path = pdf_page_to_image(filepath, p)
+        # 发送图片到gradio对话框
         print(img_path)
 
- 
-def get_ppt_content(doc_id,doc_name,page):
+
+def get_ppt_content(doc_id, doc_name, page):
     exists, filepath = check_cache(doc_name)
     if not exists:
         print("Downloading file...")
-        filepath = Download_document(doc_id,doc_name)
+        filepath = Download_document(doc_id, doc_name)
     else:
         print(f"{doc_name} is in cache")
     # 转化为pdf
-    pdfpath=os.path.splitext(filepath)[0]+".pdf"
+    pdfpath = os.path.splitext(filepath)[0]+".pdf"
     if os.path.exists(pdfpath):
-        filepath=pdfpath
+        filepath = pdfpath
         print(f"{pdfpath} is exists in cache")
     else:
-        cmd=["soffice", "--headless", "--convert-to", "pdf:writer_pdf_Export",
-            "cache\\"+doc_name, "--outdir","cache"]
+        cmd = ["soffice", "--headless", "--convert-to", "pdf:writer_pdf_Export",
+               "cache\\"+doc_name, "--outdir", "cache"]
         try:
             # subprocess.run(cmd,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-            subprocess.run(cmd,capture_output=True)
+            subprocess.run(cmd, capture_output=True)
         except Exception as e:
             print(e)
         if os.path.exists(pdfpath):
             print("pdf convert succeeded.")
-            filepath=pdfpath
+            filepath = pdfpath
         else:
             print("pdf convert failed ")
-            return ""     
+            return ""
     for p in page:
-        #把页面转化为图片
-        img_path=pdf_page_to_image(filepath, p)
-        #发送图片到gradio对话框 
-        print(img_path)  
-def get_other_content(filename,content_ltks,img_id):
+        # 把页面转化为图片
+        img_path = pdf_page_to_image(filepath, p)
+        # 发送图片到gradio对话框
+        print(img_path)
+
+
+def get_other_content(filename, content_ltks, img_id):
     """处理其他类型引文的显示"""
     time.sleep(0.3)
-    content_ltks=content_ltks.replace("。","。<br>")
-    content=f"<h3>{filename}</h3><br>{content_ltks}<br>"
-    #显示图片，特别重要
+    content_ltks = content_ltks.replace("。", "。<br>")
+    content = f"<h3>{filename}</h3><br>{content_ltks}<br>"
+    # 显示图片，特别重要
     if img_id:
-        content+=f'<img src="{BASE_URL}/v1/document/image/{img_id}" alt="图片" style="width: 800px;height:auto;image-rendering: crisp-edges; "><br>'
-        #这里地址拼接有问题，但是文档里没有找到相关内容
-    #发送HTML到gradio对话框  
-    print(content)   
+        content += f'<img src="{BASE_URL}/v1/document/image/{img_id}" alt="图片" style="width: 800px;height:auto;image-rendering: crisp-edges; "><br>'
+        # 这里地址拼接有问题，但是文档里没有找到相关内容
+    # 发送HTML到gradio对话框
+    print(content)
+
 
 def check_cache(filename):
     """Check if the file exists in the cache directory."""
@@ -225,62 +263,65 @@ def check_cache(filename):
     return os.path.exists(filepath), filepath
 
 
-
-def get_LLM_SQL(question:str):
+def get_LLM_SQL(question: str):
     """
     首先调用ragflow查找最相似的examples来优化prompt，
     然后使用llm把question转化为SQL
     最后分析是否可以可视化
     """
-    df=[]
-    #获得最接近的SQL示例
-    examples=Retrieve_chunks(question,'SQL',"rmyy_DB.xlsx",3)
-    print("example:",[re.findall("问题：(.*?)回答",d) for d in examples])
-    examples="\n\n".join(examples)
-    prompt_str=sql_prompt_file.format(content=question,examples=examples)
+    df = []
+    # 获得最接近的SQL示例
+    examples = Retrieve_chunks(question, 'SQL', "rmyy_DB.xlsx", 3)
+    examples = [d.content.replace("\\n", "").replace(
+        "\n", "").replace("\'", "'") for d in examples]
+    print("example:", [re.findall("问题：(.*?)回答", d) for d in examples])
+    examples = "\n\n".join(examples)
+    prompt_str = sql_prompt_file.format(content=question, examples=examples)
     # print(prompt_str)
     messages = [
         SystemMessage(content="你是一个SQL工程师，帮助用户编写SQL语言"),
         HumanMessage(content=prompt_str),
     ]
-    ## 输出解析
+    # 输出解析
     parser = StrOutputParser()
     parseStr = parser.invoke(llm.invoke(messages))
     if "select" not in parseStr.lower():
-        return [],parseStr,df
-    mat=re.search(r'```sql(.*?)```',parseStr,re.DOTALL | re.MULTILINE |re.I)
+        return [], parseStr, df
+    mat = re.search(r'```sql(.*?)```', parseStr,
+                    re.DOTALL | re.MULTILINE | re.I)
     if mat:
-        sql_str=mat.group(1)
+        sql_str = mat.group(1)
     else:
-        sql_str=parseStr
+        sql_str = parseStr
     # sql_str=parseStr.replace("```","").replace("sql","")
     for n in range(5):
         try:
-            sql_str=re.sub("B超|超声|彩超","US",sql_str)
-            sql_str=re.sub("病理|免疫组化","PS",sql_str)
-            sql_str=re.sub("内镜|胃肠镜|胃镜|肠镜|阴道镜|宫腔镜","ES",sql_str)
-            sql_str=re.sub("磁共振|MRI|核磁|核磁共振","MR",sql_str)
-            sql_str=re.sub("平片|普放|X片|X线片|X线","DR",sql_str)
-            df=pd.read_sql(sql_str, engine)
+            sql_str = re.sub("B超|超声|彩超", "US", sql_str)
+            sql_str = re.sub("病理|免疫组化", "PS", sql_str)
+            sql_str = re.sub("内镜|胃肠镜|胃镜|肠镜|阴道镜|宫腔镜", "ES", sql_str)
+            sql_str = re.sub("磁共振|MRI|核磁|核磁共振", "MR", sql_str)
+            sql_str = re.sub("平片|普放|X片|X线片|X线", "DR", sql_str)
+            df = pd.read_sql(sql_str, engine)
             break
         except Exception as e:
-            error_message=f"""
+            error_message = f"""
             以上代码运行出错，请修改后再次输出。错误信息：
             ```
             {e.orig}
             ```
             """
-            repair=messages.copy()
+            repair = messages.copy()
             repair.extend([
                 AIMessage(content=sql_str),
-                HumanMessage(content=error_message),   
+                HumanMessage(content=error_message),
             ])
             parseStr = parser.invoke(llm.invoke(repair))
-            mat=re.search(r'```sql(.*?)```',parseStr,re.DOTALL | re.MULTILINE |re.I)
+            mat = re.search(r'```sql(.*?)```', parseStr,
+                            re.DOTALL | re.MULTILINE | re.I)
             if mat:
-                sql_str=mat.group(1)
+                sql_str = mat.group(1)
             else:
-                sql_str=parseStr
+                sql_str = parseStr
             print(parseStr)
             print(f"SQL错误，正在进行第{n+1}次重试")
     # print("sql_str=",sql_str)
@@ -290,22 +331,23 @@ def get_LLM_SQL(question:str):
         AIMessage(content=sql_str),
         HumanMessage(content=fig_prompt),
     ])
-    ## 输出解析
+    # 输出解析
     result = llm.invoke(messages)
     parseStr = parser.invoke(result)
     # print(parseStr)
     try:
-        mat=re.search(r"\s\[.*?\]",parseStr,re.DOTALL | re.MULTILINE |re.I)
+        mat = re.search(r"\s\[.*?\]", parseStr,
+                        re.DOTALL | re.MULTILINE | re.I)
         if mat:
-            figJson=mat.group(0)
+            figJson = mat.group(0)
         else:
-            figJson=parseStr
-        parseStr=json.loads(figJson)
-        
-    except:
-        parseStr=[]
+            figJson = parseStr
+        parseStr = json.loads(figJson)
 
-    return sql_str,parseStr,df
+    except:
+        parseStr = []
+
+    return sql_str, parseStr, df
 
 
 #     return [examples[i] for i in most_similar_indices]
@@ -315,80 +357,88 @@ def clean_html(text):
     cleaned_text = soup.get_text()
     return cleaned_text
 
+
 def contains_chinese(s):
     """判断是否包含中文"""
     chinese_pattern = re.compile(r'[^\x00-\x7f]')
     return bool(chinese_pattern.search(s))
 
-def clean_sentence(sentence:str):
+
+def clean_sentence(sentence: str):
     """清洗放射和病理文本"""
-    sentence=clean_html(sentence)
-    sentence=re.sub(r'[\t\xb2\b]','',sentence).strip()
-    sentence=re.sub(r'。+','。',sentence).replace('"','')
-    sentence=re.sub(r' +',' ',sentence)
-    sentence=re.sub(r'-+','-',sentence)
+    sentence = clean_html(sentence)
+    sentence = re.sub(r'[\t\xb2\b]', '', sentence).strip()
+    sentence = re.sub(r'。+', '。', sentence).replace('"', '')
+    sentence = re.sub(r' +', ' ', sentence)
+    sentence = re.sub(r'-+', '-', sentence)
     for row in match_replace:
         if row['原始值'] is np.nan:
             continue
         if contains_chinese(row['原始值']):
-            key_str=row['原始值']
+            key_str = row['原始值']
         else:
-            key_str='(?<![A-Za-z])'+row['原始值']+'(?![A-Za-z])'
-        if  row['替换值'] is np.nan:
-            sentence=re.sub(key_str,"",sentence,flags=re.I)
+            key_str = '(?<![A-Za-z])'+row['原始值']+'(?![A-Za-z])'
+        if row['替换值'] is np.nan:
+            sentence = re.sub(key_str, "", sentence, flags=re.I)
         else:
-            sentence=re.sub(key_str,row['原始值']+"("+row['替换值']+")",sentence,flags=re.I)
+            sentence = re.sub(
+                key_str, row['原始值']+"("+row['替换值']+")", sentence, flags=re.I)
     return sentence
 
-def Match_result_LLM(radology_result:str,pathlogy_result:str):
+
+def Match_result_LLM(radology_result: str, pathlogy_result: str):
     "判断放射和病理诊断是否相符"
-    radology_result=clean_sentence(radology_result)
-    pathlogy_result=clean_sentence(pathlogy_result)
-    radology_analysis=get_orientation_position(radology_result)
-    pathlogy_analysis=get_orientation_position(pathlogy_result)
-    radology_matches=[]
+    radology_result = clean_sentence(radology_result)
+    pathlogy_result = clean_sentence(pathlogy_result)
+    radology_analysis = get_orientation_position(radology_result)
+    pathlogy_analysis = get_orientation_position(pathlogy_result)
+    radology_matches = []
     for pathlogy in pathlogy_analysis:
-        temp = [x for x in radology_analysis if ((x['position'] in pathlogy['partlist']) or 
-                (pathlogy['position'] in x['partlist'])) 
+        temp = [x for x in radology_analysis if ((x['position'] in pathlogy['partlist']) or
+                (pathlogy['position'] in x['partlist']))
                 and ((x['orientation'] == pathlogy['orientation']) or
                      ('双' in x['orientation']) or ('双' in pathlogy['orientation']) or
                      (x['orientation'] == '') or (pathlogy['orientation'] == ''))]
         if temp:
-            radology_matches.extend([x['primary'] for x in temp if x['ignore']==False])
-    if radology_matches==[]:
-        return {"result":"无法判断","reason":"放射报告和病理报告人体器官无交集"}
-    radology_matches=",".join(set(radology_matches))
+            radology_matches.extend([x['primary']
+                                    for x in temp if x['ignore'] == False])
+    if radology_matches == []:
+        return {"result": "无法判断", "reason": "放射报告和病理报告人体器官无交集"}
+    radology_matches = ",".join(set(radology_matches))
     # print("radology_matches:",radology_matches)
-    prompt_str=match_prompt_file.format(radology_result=radology_matches,pathlogy_result=pathlogy_result)
+    prompt_str = match_prompt_file.format(
+        radology_result=radology_matches, pathlogy_result=pathlogy_result)
     # print(prompt_str)
     messages = [
         SystemMessage(content="你是一个医学助理，帮助用户处理医学检查数据"),
         HumanMessage(content=prompt_str),
     ]
-    ## 输出解析
-    start=time.time()
-    response = llm.invoke(messages,config={"max_tokens": 150})
-    token_count=response.response_metadata['token_usage']['completion_tokens']
-    parseStr=response.content
-    match=re.search("({[^}]*})",parseStr)
+    # 输出解析
+    start = time.time()
+    response = llm.invoke(messages, config={"max_tokens": 150})
+    token_count = response.response_metadata['token_usage']['completion_tokens']
+    parseStr = response.content
+    match = re.search("({[^}]*})", parseStr)
     if match:
-        parseStr=match.group(1)
+        parseStr = match.group(1)
     for n in range(5):
         try:
-            result=json.loads(re.sub("json|\r|\n|`","",parseStr))
-            match_result=result['result']
-            reason=result['reason']
+            result = json.loads(re.sub("json|\r|\n|`", "", parseStr))
+            match_result = result['result']
+            reason = result['reason']
             break
         except:
             print(f"格式错误，第{n+1}次重复")
             messages.append(AIMessage(content=parseStr))
-            messages.append(HumanMessage(content="""把你的输出修正为严格的json格式，例如：{{"reason":"你判断的理由","result":"符合"}},不要在json之外有任何解释和评论"""))
-            response = llm.invoke(messages,config={"max_tokens": 150})
-            token_count=response.response_metadata['token_usage']['completion_tokens']
-            parseStr=response.content
+            messages.append(HumanMessage(
+                content="""把你的输出修正为严格的json格式，例如：{{"reason":"你判断的理由","result":"符合"}},不要在json之外有任何解释和评论"""))
+            response = llm.invoke(messages, config={"max_tokens": 150})
+            token_count = response.response_metadata['token_usage']['completion_tokens']
+            parseStr = response.content
     # print(result)
-    print("output tokens:",token_count,"耗时:%.1f秒" %(time.time()-start))
+    print("output tokens:", token_count, "耗时:%.1f秒" % (time.time()-start))
     return result
+
 
 def judge_question(question):
     """与人类对话判断意图
@@ -396,15 +446,15 @@ def judge_question(question):
     Args:
         question (_type_): _description_
     """
-    prompt_str=judge_prompt_file.format(question=question)
+    prompt_str = judge_prompt_file.format(question=question)
     # print(prompt_str)
     messages = [
         SystemMessage(content="你是一个有帮助的助手"),
         HumanMessage(content=prompt_str),
     ]
-    ## 输出解析
-    answer= llm.invoke(messages,config={"max_tokens": 1024}).content
-    
+    # 输出解析
+    answer = llm.invoke(messages, config={"max_tokens": 1024}).content
+
     try:
         result = ast.literal_eval(answer)
         return result
@@ -412,13 +462,12 @@ def judge_question(question):
         return answer
 
 
-
 if __name__ == '__main__':
-    question="支气管肺发育不良诊断标准"
-    chat_name="小影"
-    dataset_name="放射学"
+    question = "支气管肺发育不良诊断标准"
+    chat_name = "小影"
+    dataset_name = "放射学"
     # print(Show_all_docs(dataset_name))
-    Query(question,chat_name)
+    Query(question, chat_name)
     # sql_question="统计2024年11月CT检查类型中，各机器检查的人次数量"
     # result=Retrieve_chunks(sql_question,'SQL',top_n=2)
 
