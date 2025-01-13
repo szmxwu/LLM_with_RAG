@@ -95,7 +95,7 @@ def Query(question, chat_name, user_id=None):
             print(ans.content[len(cont):], end='', flush=True)
         cont = ans.content
     # 根据回答内容，生成病例检索关键词
-    Thread(target=generate_probe, args=(answer,)).start()
+    Thread(target=generate_probe, args=(ans.content,)).start()
     # 保留被大模型选用的引文或者包含图片的
     print("\n")
     reference_index = re.findall("##(\d)\$\$", ans.content)
@@ -118,6 +118,8 @@ def generate_probe(answer):
     parser = StrOutputParser()
     keywords = parser.invoke(llm.invoke(probe_prompt))
     # 将关键词返回显示在界面的回答下方，用户可点击关键词进行搜索
+    print("相关病例关键词:",keywords)
+    print(search_case(keywords))
     return keywords
 
 
@@ -128,11 +130,8 @@ def search_case(keywords):
     """
     cases = Retrieve_chunks(keywords, '病例', "", 20)
     result = []
-    if cases:
-        result.append({
-            "书籍标题": cases.document_name,
-            "内容": cases.content,
-        })
+    for case in cases:
+        result.append(f"<h3>{case.document_name}</h3><br>case.content")
     return result
 
 
@@ -440,26 +439,6 @@ def Match_result_LLM(radology_result: str, pathlogy_result: str):
     return result
 
 
-def judge_question(question):
-    """与人类对话判断意图
-
-    Args:
-        question (_type_): _description_
-    """
-    prompt_str = judge_prompt_file.format(question=question)
-    # print(prompt_str)
-    messages = [
-        SystemMessage(content="你是一个有帮助的助手"),
-        HumanMessage(content=prompt_str),
-    ]
-    # 输出解析
-    answer = llm.invoke(messages, config={"max_tokens": 1024}).content
-
-    try:
-        result = ast.literal_eval(answer)
-        return result
-    except:
-        return answer
 
 
 if __name__ == '__main__':
