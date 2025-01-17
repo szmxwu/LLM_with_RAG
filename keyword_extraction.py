@@ -100,11 +100,10 @@ sole_words = conf.get("positive", "sole_words")
 deny_words = conf.get("positive", "deny_words")
 spine_words = conf.get("clean", "spine")
 dualparts=conf.get("orientation", "dualparts")
-PATH_REPLACE_FILE = "documents/replace.xlsx"
-PATH_HAND_DICT_FILE = "documents/hand_dict.xlsx"
+
 
 # 部位知识图谱
-bodypartsknowledgegraph = pd.read_excel(PATH_HAND_DICT_FILE, sheet_name=0)
+bodypartsknowledgegraph = pd.read_excel("报告助手部位词典.xlsx", sheet_name=0)
 knowledgegraph = []
 firstlevel = set(bodypartsknowledgegraph["分类"].tolist())
 for firtpart in firstlevel:
@@ -112,7 +111,7 @@ for firtpart in firstlevel:
     knowledgegraph.append(GetLevelDic(temp))
 
 # 标题知识图谱
-titlePartsKnowledgegraph = pd.read_excel(PATH_HAND_DICT_FILE, sheet_name=1)
+titlePartsKnowledgegraph = pd.read_excel("报告助手部位词典.xlsx", sheet_name=1)
 title_knowledgegraph = []
 title_firstlevel = set(titlePartsKnowledgegraph["分类"].tolist())
 for title_firtpart in title_firstlevel:
@@ -120,15 +119,15 @@ for title_firtpart in title_firstlevel:
                                     == title_firtpart]
     title_knowledgegraph.append(GetLevelDic(temp))
 # 报告词汇清洗
-ReplaceTable = pd.read_excel(PATH_REPLACE_FILE, sheet_name=0).to_dict('records')
+ReplaceTable = pd.read_excel('replace.xlsx', sheet_name=0).to_dict('records')
 # 检查部位词汇清洗
 PartReplaceTable = pd.read_excel(
-    PATH_REPLACE_FILE, sheet_name=1).to_dict('records')
+    'replace.xlsx', sheet_name=1).to_dict('records')
 ConditionReplaceTable = pd.read_excel(
-    PATH_REPLACE_FILE, sheet_name=2).to_dict('records')
+    'replace.xlsx', sheet_name=2).to_dict('records')
 
 #正常测量值
-nomalMeasure = pd.read_excel(PATH_HAND_DICT_FILE, sheet_name=2)
+nomalMeasure = pd.read_excel("报告助手部位词典.xlsx", sheet_name=2)
 
 #文本词还原
 pattern1=re.compile(r'([^颈胸腰骶尾])(\d{1,2})[、|,|，|及|和](\d{1,2})([颈|胸|腰|骶|尾])(?!.*段)',flags=re.I)
@@ -157,6 +156,7 @@ def Str_replace(Str, title=False):
     if type(Str) != str:
         return ''
     Str = re.sub("[ \xa0\x7f]", "",Str)
+    Str = re.sub("^[\n\t\r]+\d[.|、]", "", Str)
     for row in Replace_table:
         if row['原始值'] is np.nan:
             continue
@@ -407,13 +407,18 @@ def get_positive(item, debug=False):
         return False, 0, 0,0
     sentence_list = re.split(",", re.sub(',现|,拟|,考虑', "", item['illness']))
     # sentence_list=re.split("[,，]",item['illness'])
-    sentence_list=[re.sub(stopwords, "", x,flags=re.I) for x in sentence_list ]
+    # sentence_list=[re.sub(stopwords, "", x,flags=re.I) for x in sentence_list ]
     for item in sentence_list:
         if debug:
             print("item=", item)
         # print(len(item))
         if len(item) == 0:
             continue
+        if re.search(illness_words, item):
+            if debug:
+                print(item, "in illness", re.search(illness_words, item))
+            return True, 0.0, 0.0, 0.0
+        item=re.sub(stopwords, "", item,flags=re.I)
         if item in absolute_illness:
             if debug:
                 print(absolute_illness)
@@ -424,11 +429,7 @@ def get_positive(item, debug=False):
             if debug:
                 print(item, "in", sole_words.split("|"))
             return True, 0.0, 0.0, 0.0
-        if re.search(illness_words, item) != None:
-            if debug:
-                print(item, "in illness", re.search(illness_words, item))
-            return True, 0.0, 0.0, 0.0
-        if   NormKey_pattern.search(item) == None and len(item) > 1:
+        if  NormKey_pattern.search(item) == None and len(item) > 1:
             if debug:
                 print(item, "not in norm", NormKey_pattern.search(item))
             return True, 0.0, 0.0, 0.0
@@ -504,7 +505,8 @@ def padding_sentence(dict_list, pre_ReportStr, stops):
     # and the sentence doesn't start with ignore, then update the sentence end and primary columns
     if len(dict_list) == 1:
         if dict_list[0]["sentence_end"] < stops[-1]:
-            if not starts_with_ignore(pre_ReportStr[dict_list[0]["sentence_end"]+1:stops[-1]]):
+            if not (starts_with_ignore(pre_ReportStr[dict_list[0]["sentence_end"]+1:stops[-1]]) or 
+                pre_ReportStr[dict_list[0]["sentence_end"]] in "。;；？\n\r"):
                 dict_list[0]["sentence_end"] = int(stops[-1])
                 dict_list[0]["primary"] = pre_ReportStr[dict_list[0]
                                                         ['start']:stops[-1]].replace(" ", "")
@@ -739,7 +741,7 @@ def clean_mean_step2(process_list, ambiguity_list, add_info):
         if  add_info:
             for part_info in add_info:
                 temp.extend( [x for x in ambiguity if Interval_cross(x['axis'], part_info) ])
-            if len(temp) >0 and "脊柱" not in [x['root'] for x in temp] and "皮肤软组织" not in [x['position'] for x in temp]:
+            if len(temp) >0 and len(temp)<len(ambiguity) and "脊柱" not in [x['root'] for x in temp] and "皮肤软组织" not in [x['position'] for x in temp]:
                 clean_sentence.extend(temp)
                 ambiguity_find = True
         
@@ -885,15 +887,18 @@ def fill_orientation(data_dict,pre_ReportStr):
     #             for match in re.finditer(sentence_pattern, pre_ReportStr)]
     for i, part in enumerate(data_dict):
         if part['orientation']=='' and re.search(dualparts," ".join(part['partlist'])):
-            # previous_end=[x for x in sentence_end if x<part['start']]
-            # if previous_end==[]:
-            #     break
+
             for o in data_dict[i::-1]:
                 # if o['sentence_end']<=previous_end[-1]:
                 #     break
                 if o['orientation']!="":
                     data_dict[i]['orientation']=o['orientation']
                     break
+            if part['orientation']=='':
+                for o in data_dict[i+1:i+2]:
+                    if part['position'] in o['partlist']:
+                            data_dict[i]['orientation']=o['orientation']
+                            break
     return data_dict
 
 def get_orientation_position(ReportStr: str, debug=False, title=False, match=False, add_info=[]):
@@ -942,7 +947,7 @@ def get_orientation_position(ReportStr: str, debug=False, title=False, match=Fal
 
     result = padding_sentence(result, pre_ReportStr, stops)
     result = clean_mean(result, pre_ReportStr, add_info)
-    result = merge_part(result, pre_ReportStr, title)
+    
 
     if title:
         for d in result:
@@ -958,7 +963,9 @@ def get_orientation_position(ReportStr: str, debug=False, title=False, match=Fal
     else:
         for d in result:
             d['deny']=True if re.search(deny_words,d['illness']) else False
-    result=fill_orientation(result,pre_ReportStr)             
+    result = sorted(result, key=lambda x: (x['start'], x['word_start']))
+    result=fill_orientation(result,pre_ReportStr) 
+    result = merge_part(result, pre_ReportStr, title)            
     result = [{k: v for k, v in d.items() if k not in ["word_end",
                                                        "sentence_end", "partlist_length", "merge"]} for d in result]
 
@@ -1008,16 +1015,18 @@ if __name__ == "__main__":
     # ReportStr = "双侧前根囊肿，退行性变"
     # ReportStr = "肝胆系：胆囊可见结石"
 
-    ReportStr = """胆囊壁略肿胀"""
-    StudyPart = """胸部/肺平扫"""
+    ReportStr = """
+双侧额顶枕叶多发缺血灶。    
+双侧额叶白质小缺血灶"     """
+    StudyPart = """胸部/肺平扫，全腹部平扫"""
 #     ReportStr = """
 # 第腰2-4椎体，第2/3,3/4,4/5腰椎间盘，颈2,3,4椎体骨折
 #     """
     # studypart_analyze = get_orientation_position(StudyPart, title=True)
+    # df = get_orientation_position(ReportStr,add_info=[s['axis'] for s in studypart_analyze])
     df = get_orientation_position(ReportStr)
-    # df = get_orientation_position(ReportStr)
-    # pprint(studypart_analyze,compact=True)
-    # pprint([d["orientation"]+" "+",".join(d['partlist'])+":"+d['illness'] +" positive="+str(d['positive']) for d in  df])
+    # pprint(df,compact=True)
+    pprint([(d["orientation"],d['partlist'],d['illness'],d['positive']) for d in  df])
     #print(disk_extend(ReportStr))
     # print(find_measure("胆总管直径17mm"))
     # studypart_analyze = get_orientation_position(StudyPart, title=True)
@@ -1025,7 +1034,7 @@ if __name__ == "__main__":
     # ReportStr = "胆囊不大，颈部见致密影"
     # df = get_orientation_position(StudyPart, title=True)
     # df = get_orientation_position(ReportStr, add_info=[s['axis'] for s in studypart_analyze])
-    pprint(df)
+    # pprint(df)
     # df = get_orientation_position(ReportStr)
 
 # In[35]:

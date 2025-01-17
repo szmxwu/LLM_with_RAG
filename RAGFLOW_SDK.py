@@ -8,6 +8,7 @@ import asyncio
 from threading import Thread
 import time
 import requests
+import urllib.request
 # 加载.env文件中的环境变量
 load_dotenv()
 # 访问环境变量
@@ -70,25 +71,33 @@ def List_datasets(name=None):
 
 
 def upload_single_file(dataset, filename):
+    """分拆并上传单个文件
+
+    Args:
+        dataset (string): 知识库名
+        filename (list): 文件地址列表
+
+    Returns:
+        _type_: _description_
+    """
     # 提取扩展名
     file_extension = os.path.splitext(os.path.basename(filename))[1]
     if file_extension.lower() == '.pdf':
         document_list = split_pdf(filename)
-    elif file_extension.lower() == '.pptx':
-        document_list = split_pptx(filename)
-    elif file_extension.lower() == '.docx':
-        document_list = split_docx(filename)
+    # elif file_extension.lower() == '.pptx':
+    #     document_list = split_pptx(filename)
     else:
-        if os.path.getsize(filename) > 1024*1024*128:
+        if os.path.getsize(filename) > 1024*1024*1280:
             return "文件太大，无法处理"
         document_list = [filename]
     doc_blobs = []
     for doc in document_list:
         doc_blobs.append({
-            "display_name": os.path.basename(doc),
+            "displayed_name": os.path.basename(doc),
             "blob": open(doc, 'rb').read()
         })
-    dataset.upload_documents(doc_blobs)
+    print("正在上传:",document_list)
+    return dataset.upload_documents(doc_blobs)
 
 
 def Upload_documents(dataset_name: str, filename_list: list):
@@ -105,27 +114,27 @@ def Upload_documents(dataset_name: str, filename_list: list):
         return f"can't find dataset {dataset_name}"
     for filename in filename_list:
         file_extension = os.path.splitext(os.path.basename(filename))[1]
-        if file_extension.lower() not in ['.pdf', '.docx', '.pptx', '.xlsx',
+        if file_extension.lower() not in ['.pdf', '.docx', '.pptx', '.xlsx','.doc','xls','ppt',
                                           '.txt', '.jpg', '.jpeg', '.png', '.bmp']:
             return f"不支持的文件类型: {file_extension}"
     # 使用多进程并行上传文件
-    with Pool(processes=os.cpu_count()) as pool:
+    with Pool(processes=4) as pool:
         pool.starmap(upload_single_file, [
                      (dataset[0], filename) for filename in filename_list])
 
 
 def Download_document(doc_id, doc_name):
     """
-    遍历所有知识库，下载文件到缓存目录
+    下载文件到缓存目录
     """
-    datasets = List_datasets()
-    for dataset in datasets:
-        doc = dataset.list_documents(id=doc_id)
-        if len(doc) > 0:
-            open(f"{CACHE_DIR}/{doc_name}", "wb+").write(doc[0].download())
-            return f"{CACHE_DIR}/{doc_name}"
-        else:
-            return f"can't find file {doc_name}"
+    url=f"{BASE_URL}/v1/document/get/{doc_id}"
+    try:
+        urllib.request.urlretrieve(url, f"{CACHE_DIR}/{doc_name}")
+        print("下载完成！")
+        return f"{CACHE_DIR}/{doc_name}"
+    except Exception as e:
+        return "下载失败:", e
+    
 
 
 def List_documents(dataset_name, doc_id=None):
@@ -156,7 +165,7 @@ def Delete_documents(dataset_name, doc_ids):
     dataset[0].delete_documents(ids=doc_ids)
 
 
-def Parse_documents(dataset_name):
+def Parse_documents(dataset_name,doc_id=None):
     """解析当前知识库内状态为unstart的文档
 
     Args:
@@ -165,26 +174,16 @@ def Parse_documents(dataset_name):
     dataset = List_datasets(name=dataset_name)
     if not dataset:
         return f"can't find dataset {dataset_name}"
-    docs = List_documents(dataset_name)
-    unParsed_docs = [x for x in docs if x.run == "UNSTART"]
-    ids = []
-    for doc in unParsed_docs:
-        file_extension = os.path.splitext(doc.name)[1]
-        if file_extension.lower() == '.pptx':
-            doc.update([{"parser_config": {"chunk_token_count": 256}},
-                        {"chunk_method": "presentation"}])
-        elif file_extension.lower() in ['.jpg', '.bmp', '.png', '.jpeg']:
-            doc.update([{"parser_config": {"chunk_token_count": 256}},
-                        {"chunk_method": "picture"}])
-        elif file_extension.lower() in ['.xlsx', '.csv']:
-            doc.update([{"parser_config": {"chunk_token_count": 256}},
-                        {"chunk_method": "table"}])
-        else:
-            doc.update([{"parser_config": {"chunk_token_count": 256}},
-                        {"chunk_method": "naive"}])
-        ids.append(doc.id)
-    dataset[0].async_parse_documents(ids)
-    print("Async bulk parsing initiated.")
+    if doc_id:
+        try:
+            dataset[0].async_parse_documents(doc_id)
+        except:
+            return f"doc_id={doc_id} not found"
+    else:
+        docs = List_documents(dataset_name)
+        ids = [x.id for x in docs if x.run == "UNSTART"]
+        dataset[0].async_parse_documents(ids)
+        return "Async bulk parsing initiated"
 
 
 def Stop_parsing(dataset_name, document_ids):
@@ -342,26 +341,41 @@ def Show_all_docs(dataset_name):
             "doc_id": d.id,
             "处理记录": d.progress_msg
         })
-        return result
+    return result
 
 
 if __name__ == '__main__':
-    question = "上颌骨的常见病变有哪些？"
-    chat_name = "小影"
-    assistant = ragflow.list_chats(name=chat_name)
-    assistant = assistant[0]
-    session = assistant.create_session()
+    # question = "上颌骨的常见病变有哪些？"
+    # chat_name = "小影"
+    # assistant = ragflow.list_chats(name=chat_name)
+    # assistant = assistant[0]
+    # session = assistant.create_session()
 
-    print("\n==================== Miss R =====================\n")
-    print("Hello. What can I do for you?")
+    # print("\n==================== Miss R =====================\n")
+    # print("Hello. What can I do for you?")
 
-    while True:
-        question = input(
-            "\n==================== User =====================\n> ")
-        print("\n==================== Miss R =====================\n")
+    # while True:
+    #     question = input(
+    #         "\n==================== User =====================\n> ")
+    #     print("\n==================== Miss R =====================\n")
 
-        cont = ""
-        for ans in session.ask(question, stream=True):
-            print(ans.content[len(cont):], end='', flush=True)
-            cont = ans.content
-        print(ans.reference)
+    #     cont = ""
+    #     for ans in session.ask(question, stream=True):
+    #         print(ans.content[len(cont):], end='', flush=True)
+    #         cont = ans.content
+    #     print(ans.reference)
+    filename_list = []
+    directory="H:\\output_directory\\other"
+    # # 遍历指定路径下所有的文件和目录
+    for root, _, files in os.walk(directory):
+        # 每次迭代时，root是当前的目录路径，而files是该目录下的文件列表
+        for file in files:
+            # 获取文件的完整路径（绝对路径）
+            file_path = os.path.join(root, file)
+            # 将路径添加到列表中
+            filename_list.append(file_path)
+    Upload_documents("放射学", filename_list)
+    
+
+    # result=Show_all_docs("放射学")
+    # print([d['文档名'] for d in result])

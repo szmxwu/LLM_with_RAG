@@ -3,11 +3,9 @@ from process_docs import pdf_page_to_image
 import re
 import os
 import time
-from threading import Thread
 import json
 import subprocess
-import uuid
-import gradio
+import requests
 import re
 import pandas as pd
 import numpy as np
@@ -17,12 +15,11 @@ from bs4 import BeautifulSoup
 import sqlalchemy as sql
 from keyword_extraction import get_orientation_position
 import configparser
-from sklearn.metrics.pairwise import cosine_similarity
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain.prompts import load_prompt
 from langchain_openai import ChatOpenAI
-import ast
+import base64
 # from langchain.memory import ConversationTokenBufferMemory
 # from langchain.chains import ConversationChain
 from langchain_community.embeddings import XinferenceEmbeddings
@@ -76,37 +73,6 @@ with open('prompt/fig_prompt.txt', 'r', encoding='utf-8') as file:
     fig_prompt = file.read()
 
 
-def Query(question, chat_name, user_id=None):
-    """调用Query_steam并等待流式回答完全结束，返回两部分结果：
-       第一部分是在流式回答的过程中，实时返回Query_steam函数的输出；
-       第二部分是等待流式回答完全结束后，返回json格式的完整回答。
-
-    Args:
-        question (str): 用户提出的问题
-        chat_name (str): 聊天助手的名字
-        user_id (str, optional): 用户ID. Defaults to None.
-
-
-    """
-    answer = Query_steam(question, chat_name, user_id)
-    cont = ""
-    for ans in answer:
-        if ans.content[len(cont):] not in cont:
-            print(ans.content[len(cont):], end='', flush=True)
-        cont = ans.content
-    # 根据回答内容，生成病例检索关键词
-    Thread(target=generate_probe, args=(ans.content,)).start()
-    # 保留被大模型选用的引文或者包含图片的
-    print("\n")
-    reference_index = re.findall("##(\d)\$\$", ans.content)
-    if reference_index:
-        reference_index = [int(x) for x in reference_index]
-    reference = []
-    for index, ref in enumerate(ans.reference):
-        if (index in reference_index) or len(ref["image_id"]) > 0:
-            reference.append(ref)
-    send_reference(reference)
-
 
 def generate_probe(answer):
     """
@@ -119,81 +85,63 @@ def generate_probe(answer):
     keywords = parser.invoke(llm.invoke(probe_prompt))
     # 将关键词返回显示在界面的回答下方，用户可点击关键词进行搜索
     print("相关病例关键词:",keywords)
-    print(search_case(keywords))
+    # print(search_case(keywords))
     return keywords
 
 
 def search_case(keywords):
     """
     根据关键词搜索病例库
-    弹出新的页面，用列表+图像展示病例，注意文档中的图片URL是相对路径，需要转换为绝对路径
+    弹出新的页面，用列表+图像展示病例
     """
     cases = Retrieve_chunks(keywords, '病例', "", 20)
     result = []
     for case in cases:
-        result.append(f"<h3>{case.document_name}</h3><br>case.content")
+        html_content=f"<h3>{case.document_name}</h3><br>{case.content}"
+        ##把图片转化为base64编码后发送，注意图片文件的路径为pictures\000002.png
+        pattern = re.compile(r'<img[^>]+src=["\']([^">]+)["\'].*?>', re.IGNORECASE)
+        matches = pattern.findall(html_content)
+        for img_path in matches:
+            if os.path.exists(img_path):
+                with open(img_path,"rb") as image_file:
+                    images_base64=base64.b64encode(image_file.read()).decode("utf-8")
+                    html_content=html_content.replace(img_path,f"data:image/png;base64,{images_base64}")
+        result.append(html_content)
     return result
 
 
-def send_reference(reference_chunks):
-    """发送参考文献
+# def send_reference(reference_chunks):
+#     """发送参考文献
 
-    Args:
-        reference_chunks (_type_): _description_
+#     Args:
+#         reference_chunks (_type_): _description_
 
-    Returns:
-        _type_: _description_
-    """
-    if not reference_chunks:
-        return None
-    # 合并同一文件的多个页码
-    merged_docs = {}
-    for doc in reference_chunks:
-        try:
-            doc['page'] = list(set([int(x[0]) for x in doc['positions']]))
-        except:
-            doc['page'] = []
-        if doc['document_id'] not in merged_docs or doc['page'] == []:
-            merged_docs[doc['document_id']] = doc
-        else:
-            merged_docs[doc['document_id']]['page'].extend(doc['page'])
-            merged_docs[doc['document_id']]['page'] = sorted(
-                list(set(merged_docs[doc['document_id']]['page'])))
-    reference_chunks = [value for value in merged_docs.values()]
-    references = "### 参考文献\n"
-    index = 1
-    for chunk in reference_chunks:
-        extension = os.path.splitext(chunk['document_name'])[1]
-        extension = extension[1:]
-        if chunk['document_id'] not in references:
-            file_extension = os.path.splitext(
-                os.path.basename(chunk['document_name']))[1]
-            if file_extension in ['.xlsx', '.xls', '.ppt', '.pptx']:
-                # 以上文件类型为下载链接
-                references += f"- [{index}] [{chunk['document_name']}]({BASE_URL}/v1/document/get/{chunk['document_id']}){chunk['page']}\n"
-            else:
-                # 以上文件类型为预览链接
-                references += f"- [{index}] [{chunk['document_name']}]({BASE_URL}/document/{chunk['document_id']}?ext={extension}&prefix=document){chunk['page']}\n"
-            index += 1
-        if extension == "pdf":
-            Thread(target=get_pdf_content, args=(
-                chunk['document_id'],
-                chunk['document_name'],
-                chunk['page']
-            )).start()
-        elif extension == "pptx":
-            Thread(target=get_ppt_content, args=(
-                chunk['document_id'],
-                chunk['document_name'],
-                chunk['page']
-            )).start()
-        else:
-            Thread(target=get_other_content, args=(
-                chunk['document_name'],
-                chunk['content'],
-                chunk['image_id']
-            )).start()
-    print(references)
+#     Returns:
+#         _type_: _description_
+#     """
+#     if not reference_chunks:
+#         return None
+#     for chunk in reference_chunks:
+#         extension = os.path.splitext(chunk['document_name'])[1]
+#         extension = extension[1:]
+#         if extension == "pdf":
+#             Thread(target=get_pdf_content, args=(
+#                 chunk['document_id'],
+#                 chunk['document_name'],
+#                 chunk['page']
+#             )).start()
+#         elif extension == "pptx":
+#             Thread(target=get_ppt_content, args=(
+#                 chunk['document_id'],
+#                 chunk['document_name'],
+#                 chunk['page']
+#             )).start()
+#         else:
+#             Thread(target=get_other_content, args=(
+#                 chunk['document_name'],
+#                 chunk['content'],
+#                 chunk['image_id']
+#             )).start()
 
 
 def get_pdf_content(doc_id, doc_name, page):
@@ -206,8 +154,13 @@ def get_pdf_content(doc_id, doc_name, page):
     for p in page:
         # 把页面转化为图片
         img_path = pdf_page_to_image(filepath, p)
-        # 发送图片到gradio对话框
-        print(img_path)
+        # 返回图片
+        images=[]
+        if os.path.exists(img_path):
+            with open(img_path,"rb") as image_file:
+                images.append(base64.b64encode(image_file.read()).decode("utf-8"))
+    return images
+
 
 
 def get_ppt_content(doc_id, doc_name, page):
@@ -239,8 +192,12 @@ def get_ppt_content(doc_id, doc_name, page):
     for p in page:
         # 把页面转化为图片
         img_path = pdf_page_to_image(filepath, p)
-        # 发送图片到gradio对话框
-        print(img_path)
+        # 返回图片
+        images=[]
+        if os.path.exists(img_path):
+            with open(img_path,"rb") as image_file:
+                images.append(base64.b64encode(image_file.read()).decode("utf-8"))
+    return images
 
 
 def get_other_content(filename, content_ltks, img_id):
@@ -250,10 +207,13 @@ def get_other_content(filename, content_ltks, img_id):
     content = f"<h3>{filename}</h3><br>{content_ltks}<br>"
     # 显示图片，特别重要
     if img_id:
-        content += f'<img src="{BASE_URL}/v1/document/image/{img_id}" alt="图片" style="width: 800px;height:auto;image-rendering: crisp-edges; "><br>'
-        # 这里地址拼接有问题，但是文档里没有找到相关内容
-    # 发送HTML到gradio对话框
-    print(content)
+        img_url=f"{BASE_URL}/v1/document/image/{img_id}"
+        response=requests.get(img_url)
+        if response.status_code==200:
+            image_base64=base64.b64encode(response.content).decode("utf-8")
+            content += f'<img src="data:image/png;base64,{image_base64}" alt="图片" style="width: 800px;height:auto;image-rendering: crisp-edges; "><br>'
+        print(img_url)
+    return content
 
 
 def check_cache(filename):
@@ -442,11 +402,13 @@ def Match_result_LLM(radology_result: str, pathlogy_result: str):
 
 
 if __name__ == '__main__':
-    question = "支气管肺发育不良诊断标准"
+    question = "人体断层解剖图谱(大脑)"
     chat_name = "小影"
     dataset_name = "放射学"
     # print(Show_all_docs(dataset_name))
-    Query(question, chat_name)
+    #Query(question, chat_name)
+    # keywords="Bronchopulmonary Dysplasia FiO2 severity grading imaging chest_X_ray"
+    # print(search_case(keywords))
     # sql_question="统计2024年11月CT检查类型中，各机器检查的人次数量"
     # result=Retrieve_chunks(sql_question,'SQL',top_n=2)
 
