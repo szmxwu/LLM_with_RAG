@@ -1,5 +1,19 @@
-from RAGFLOW_SDK import Download_document, List_documents, Upload_documents, List_datasets, Create_dataset, Delete_documents, Parse_documents, Stop_parsing, Retrieve_chunks, Query_steam, BASE_URL, Agent_chat, Show_all_datasets, Show_all_docs
-from process_docs import pdf_page_to_image
+from RAGFLOW_SDK import (Download_document, 
+                         List_documents, 
+                         Upload_documents, 
+                         List_datasets, 
+                         Create_dataset, 
+                         Delete_documents, 
+                         Parse_documents, 
+                         Stop_parsing, 
+                         Retrieve_chunks, 
+                         BASE_URL, 
+                         Agent_chat, 
+                         Show_all_datasets, 
+                         Show_all_docs,
+                         List_chunks
+                         )
+from process_docs import pdf_page_to_image,RAGFlowPptParser
 import re
 import os
 import time
@@ -17,12 +31,14 @@ from keyword_extraction import get_orientation_position
 import configparser
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
-from langchain.prompts import load_prompt
+from langchain.prompts import load_prompt,PromptTemplate
 from langchain_openai import ChatOpenAI
 import base64
+import asyncio
 # from langchain.memory import ConversationTokenBufferMemory
 # from langchain.chains import ConversationChain
 from langchain_community.embeddings import XinferenceEmbeddings
+from functools import lru_cache
 from dotenv import load_dotenv
 warnings.filterwarnings('ignore')
 load_dotenv()
@@ -53,13 +69,10 @@ llm = ChatOpenAI(
 )
 
 
-embedder = XinferenceEmbeddings(
-    server_url=XINFERENCE,
-    model_uid=EMBEDDING
-)
-
-# 建立大模型临时记忆
-history_messages = []
+# embedder = XinferenceEmbeddings(
+#     server_url=XINFERENCE.replace("/v1",""),
+#     model_uid=EMBEDDING
+# )
 
 
 # 读取预设提示词
@@ -82,11 +95,43 @@ def generate_probe(answer):
         probe_prompt = file.read()
     probe_prompt = probe_prompt.replace("{answer}", answer)
     parser = StrOutputParser()
-    keywords = parser.invoke(llm.invoke(probe_prompt))
+    messages = [
+        SystemMessage(content="你是一个经验丰富的医学专业英语编辑，帮助用户处理医学文本"),
+        HumanMessage(content=probe_prompt),
+        ]
+    
+    result = parser.invoke(llm.invoke(messages))
+    # print(result)
+    scucess=False
+    for i in range(3):
+        try:
+            sentence=result.replace("_", " ").split("\n")
+            long_keywords=[x for x in sentence[1].split(" ") if x!='']
+            short_keywords=[x for x in sentence[2].split(" ") if x!='']
+            if len(long_keywords)>5:
+                keywords=short_keywords
+            else:
+                keywords=long_keywords
+            if not "".join(keywords).isalnum():
+                raise ValueError("输出格式错误")
+            scucess=True
+            break
+        except:
+            print(f"关键词格式提取有误'{keywords}'，第{i}遍重新提取")
+            messages.append(
+                AIMessage(keywords)
+            )
+            messages.append(
+                HumanMessage("你没有按照格式要求输出, 请重新输出。")
+            )
+            keywords = parser.invoke(llm.invoke(messages))
+
     # 将关键词返回显示在界面的回答下方，用户可点击关键词进行搜索
-    print("相关病例关键词:",keywords)
-    # print(search_case(keywords))
-    return keywords
+    # print("相关病例关键词:",keywords)
+    if scucess:
+        return " ".join(keywords)
+    else:
+        return ''
 
 
 def search_case(keywords):
@@ -97,79 +142,70 @@ def search_case(keywords):
     cases = Retrieve_chunks(keywords, '病例', "", 20)
     result = []
     for case in cases:
-        html_content=f"<h3>{case.document_name}</h3><br>{case.content}"
-        ##把图片转化为base64编码后发送，注意图片文件的路径为pictures\000002.png
+        filname=case.document_name
+        filname=filname.replace(".md","")
+        html_content=f"<h3>{filname}</h3><br>{case.content}"
+        ##把图片转化为base64编码后发送，注意图片文件的路径格式为pictures\000002.png
         pattern = re.compile(r'<img[^>]+src=["\']([^">]+)["\'].*?>', re.IGNORECASE)
         matches = pattern.findall(html_content)
         for img_path in matches:
-            if os.path.exists(img_path):
-                with open(img_path,"rb") as image_file:
+            if os.path.exists(img_path.replace("\\","/")):
+                with open(img_path.replace("\\","/"),"rb") as image_file:
                     images_base64=base64.b64encode(image_file.read()).decode("utf-8")
                     html_content=html_content.replace(img_path,f"data:image/png;base64,{images_base64}")
+            else:
+                print(f"{img_path}未找到")
         result.append(html_content)
     return result
 
 
-# def send_reference(reference_chunks):
-#     """发送参考文献
 
-#     Args:
-#         reference_chunks (_type_): _description_
-
-#     Returns:
-#         _type_: _description_
-#     """
-#     if not reference_chunks:
-#         return None
-#     for chunk in reference_chunks:
-#         extension = os.path.splitext(chunk['document_name'])[1]
-#         extension = extension[1:]
-#         if extension == "pdf":
-#             Thread(target=get_pdf_content, args=(
-#                 chunk['document_id'],
-#                 chunk['document_name'],
-#                 chunk['page']
-#             )).start()
-#         elif extension == "pptx":
-#             Thread(target=get_ppt_content, args=(
-#                 chunk['document_id'],
-#                 chunk['document_name'],
-#                 chunk['page']
-#             )).start()
-#         else:
-#             Thread(target=get_other_content, args=(
-#                 chunk['document_name'],
-#                 chunk['content'],
-#                 chunk['image_id']
-#             )).start()
-
-
-def get_pdf_content(doc_id, doc_name, page):
+def get_pdf_content(chunk):
+    doc_id=chunk['document_id']
+    doc_name=chunk['document_name']
+    page=chunk['page']
     exists, filepath = check_cache(doc_name)
     if not exists:
         print("Downloading file...")
         filepath = Download_document(doc_id, doc_name)
     else:
         print(f"{doc_name} is in cache")
+    content=f"<h3>{doc_name}</h3><br>"
     for p in page:
         # 把页面转化为图片
         img_path = pdf_page_to_image(filepath, p)
         # 返回图片
-        images=[]
         if os.path.exists(img_path):
             with open(img_path,"rb") as image_file:
-                images.append(base64.b64encode(image_file.read()).decode("utf-8"))
-    return images
+                image_base64=base64.b64encode(image_file.read()).decode("utf-8")
+                content += f'<img src="data:image/png;base64,{image_base64}" alt="图片" style="width: 800px;height:auto;image-rendering: crisp-edges; "><br>'
+        else:
+            print("文件不存在：",img_path)
+    # print(content)
+    return content
 
 
 
-def get_ppt_content(doc_id, doc_name, page):
+def get_ppt_content(chunk):
+    doc_id=chunk['document_id']
+    doc_name=chunk['document_name']
+    page=chunk['page']
+    content=chunk['content']
     exists, filepath = check_cache(doc_name)
     if not exists:
         print("Downloading file...")
         filepath = Download_document(doc_id, doc_name)
     else:
         print(f"{doc_name} is in cache")
+    
+    #缺少页码的处理方式
+    if not page:
+        pptParser=RAGFlowPptParser()       
+        page=pptParser( filepath, content)
+        if not page:
+            return None
+        else:
+            page=[page]
     # 转化为pdf
     pdfpath = os.path.splitext(filepath)[0]+".pdf"
     if os.path.exists(pdfpath):
@@ -189,32 +225,69 @@ def get_ppt_content(doc_id, doc_name, page):
         else:
             print("pdf convert failed ")
             return ""
+    content=f"<h3>{doc_name}</h3><br>"
     for p in page:
         # 把页面转化为图片
         img_path = pdf_page_to_image(filepath, p)
         # 返回图片
-        images=[]
         if os.path.exists(img_path):
             with open(img_path,"rb") as image_file:
-                images.append(base64.b64encode(image_file.read()).decode("utf-8"))
-    return images
-
-
-def get_other_content(filename, content_ltks, img_id):
-    """处理其他类型引文的显示"""
-    time.sleep(0.3)
-    content_ltks = content_ltks.replace("。", "。<br>")
-    content = f"<h3>{filename}</h3><br>{content_ltks}<br>"
-    # 显示图片，特别重要
-    if img_id:
-        img_url=f"{BASE_URL}/v1/document/image/{img_id}"
-        response=requests.get(img_url)
-        if response.status_code==200:
-            image_base64=base64.b64encode(response.content).decode("utf-8")
-            content += f'<img src="data:image/png;base64,{image_base64}" alt="图片" style="width: 800px;height:auto;image-rendering: crisp-edges; "><br>'
-        print(img_url)
+                image_base64=base64.b64encode(image_file.read()).decode("utf-8")
+                content += f'<img src="data:image/png;base64,{image_base64}" alt="图片" style="width: 800px;height:auto;image-rendering: crisp-edges; "><br>'
     return content
 
+def get_img_base64(img_id:str):
+    img_url=f"{BASE_URL}/v1/document/image/{img_id}"
+    response=requests.get(img_url)
+    if response.status_code==200:
+        return base64.b64encode(response.content).decode("utf-8")
+    else:
+        return None
+
+def get_other_content(chunk):
+    """处理其他类型引文的显示"""
+    @lru_cache(maxsize=1000)
+    def cached_content(
+        filename:str,
+        content_ltks:str,
+        img_id:str,
+        doc_id:str,
+        dataset_id:str,
+    )->str:
+
+        # content_ltks = content_ltks.replace("。", "。<br>")
+        content = f"<h3>{filename}</h3><br>{content_ltks}<br>"
+        # 显示图片，特别重要
+        if img_id:
+            image_base64=get_img_base64(img_id)
+            content += f'<img src="data:image/png;base64,{image_base64}" alt="图片" id="{img_id}" style="width: 800px;height:auto;image-rendering: crisp-edges; "><br>'
+        all_chunks=List_chunks(dataset_id,doc_id)
+        #查找前后的图片
+        start=time.time()
+        try:
+            target_index=next(i for i,d in enumerate(all_chunks) if d.id==chunk['id'])
+        except StopIteration:
+            target_index=None
+        prev=all_chunks[target_index-1] if target_index>0 else None
+        next_item=all_chunks[target_index+1] if target_index<len(all_chunks)-1 else None
+        # print(f"查找前后的图片耗时：{time.time()-start}")
+        if prev is not None:
+            if prev.image_id:
+                image_base64=get_img_base64(prev.image_id)
+                content += f'<img src="data:image/png;base64,{image_base64}" alt="图片" id="{prev.image_id}" style="width: 800px;height:auto;image-rendering: crisp-edges; "><br>'
+        if next_item is not None:
+            if next_item.image_id:
+                content+=next_item.content+"<br>"
+                image_base64=get_img_base64(next_item.image_id)
+                content += f'<img src="data:image/png;base64,{image_base64}" alt="图片" id="{next_item.image_id}" style="width: 800px;height:auto;image-rendering: crisp-edges; "><br>'
+        return content
+    return cached_content(
+        filename=chunk['document_name'],
+        content_ltks=chunk['content'],
+        img_id=chunk['image_id'],
+        doc_id=chunk['document_id'],
+        dataset_id=chunk['dataset_id'],
+    )
 
 def check_cache(filename):
     """Check if the file exists in the cache directory."""
@@ -405,6 +478,7 @@ if __name__ == '__main__':
     question = "人体断层解剖图谱(大脑)"
     chat_name = "小影"
     dataset_name = "放射学"
+    
     # print(Show_all_docs(dataset_name))
     #Query(question, chat_name)
     # keywords="Bronchopulmonary Dysplasia FiO2 severity grading imaging chest_X_ray"

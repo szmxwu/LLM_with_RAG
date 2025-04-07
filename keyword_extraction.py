@@ -1,8 +1,5 @@
-
-
 # -*- coding: utf-8 -*-'
 #!/usr/bin/env python3
-
 import pandas as pd
 import numpy as np
 import re
@@ -12,6 +9,7 @@ from datetime import datetime
 import warnings
 import configparser
 from pprint import pprint
+from functools import lru_cache
 warnings.filterwarnings("ignore")
 
 
@@ -118,6 +116,19 @@ for title_firtpart in title_firstlevel:
     temp = titlePartsKnowledgegraph[titlePartsKnowledgegraph["分类"]
                                     == title_firtpart]
     title_knowledgegraph.append(GetLevelDic(temp))
+    
+#加载知识图谱关键词
+preprocessed_kg=[]
+for kg in knowledgegraph:
+    processor=KeywordProcessor()
+    processor.add_keywords_from_dict(kg)
+    preprocessed_kg.append(processor)
+titile_preprocessed_kg=[]
+for kg in title_knowledgegraph:
+    processor=KeywordProcessor()
+    processor.add_keywords_from_dict(kg)
+    titile_preprocessed_kg.append(processor)
+
 # 报告词汇清洗
 ReplaceTable = pd.read_excel('replace.xlsx', sheet_name=0).to_dict('records')
 # 检查部位词汇清洗
@@ -155,8 +166,8 @@ def Str_replace(Str, title=False):
     # 一般处理
     if type(Str) != str:
         return ''
-    Str = re.sub("[ \xa0\x7f]", "",Str)
-    Str = re.sub("^[\n\t\r]+\d[.|、]", "", Str)
+    Str = re.sub(r"[ \xa0\x7f]", "",Str)
+    Str = re.sub(r"^[\n\t\r]+\d[.|、]", "", Str)
     for row in Replace_table:
         if row['原始值'] is np.nan:
             continue
@@ -174,12 +185,11 @@ def Str_replace(Str, title=False):
         sentence_end = [len(Str)]
     cstops = [0]
     cstops.extend(sentence_end)
-    
     for i in range(len(cstops)-1):
         temp = Str[cstops[i]:cstops[i+1]]
         if temp=="":
             continue
-        if re.search(spine_words, temp):
+        if re.search(rf"{spine_words}", temp):
             temp = pattern9.sub('\\1颈\\2',temp)
             temp = pattern10.sub('\\1胸\\2',temp)
             temp = pattern13.sub('\\1胸\\2',temp)
@@ -189,7 +199,7 @@ def Str_replace(Str, title=False):
             for row in ConditionReplaceTable:
                 if row['替换值'] is np.nan or row['原始值'] is np.nan:
                     continue
-                temp=re.sub(row['原始值'],row['替换值'],temp)
+                temp=re.sub(rf"{row['原始值']}",row['替换值'],temp)
         Str = Str.replace(Str[cstops[i]:cstops[i+1]], temp)
     return Str
 
@@ -252,9 +262,9 @@ def disk_extend(Str):
             if group[0]!=group[4] and group[4]!='':
                 for i in range(1,end+1):
                     new_str+=group[4]+str(i)+"/"+str(i+1)+"、"
-            new_str=re.sub("[颈|c]7/8","颈7/胸1",new_str,flags=re.I)
-            new_str=re.sub("[胸|t]12/13","胸12/腰1",new_str,flags=re.I)
-            new_str=re.sub("[腰|l]5/6","腰5/骶1",new_str,flags=re.I)
+            new_str=re.sub(r"[颈|c]7/8","颈7/胸1",new_str,flags=re.I)
+            new_str=re.sub(r"[胸|t]12/13","胸12/腰1",new_str,flags=re.I)
+            new_str=re.sub(r"[腰|l]5/6","腰5/骶1",new_str,flags=re.I)
             old_str=group[0]+group[1]+"/"+group[2]+group[3]+"-"+group[4]+group[5]+"/"+group[6]+group[7]
             Str=Str.replace(old_str,new_str[:-1])
     except:
@@ -277,6 +287,45 @@ def extend_spine_dot(sentence):
             sentence=new_sentence
         n+=1
     return sentence
+
+def expand_ribbon(s):
+    # 匹配前导部分、可选的“第”、数字部分和后续部分
+    if "肋" not in s:
+        return s
+    match = re.match(r'^(.*?)(第)?([\d、-]+)([肋|腋肋|后肋|前肋|背肋]\D*)$', s)
+    if not match:
+        return s
+    
+    prefix, di_part, number_part, suffix = match.groups()
+    if not number_part:
+        return s
+    numbers = []
+    items = number_part.split('、')  # 使用中文顿号分割
+    try:
+        for item in items:
+            # print("s=",s,"item=",item)
+            if '-' in item:
+                start_str, end_str = item.split('-')
+                start = int(start_str.strip())
+                end = int(end_str.strip())
+                numbers.extend(range(start, end + 1))
+            else:
+                num = int(item.strip())
+                numbers.append(num)
+    except:
+        return s
+    # 生成展开后的各个项
+    if di_part:
+        # 若原数字部分包含“第”，则直接使用原“第”作为前缀
+        expanded = [f'{di_part}{num}{suffix}' for num in numbers]
+    else:
+        # 否则添加“第”前缀
+        expanded = [f'第{num}{suffix}' for num in numbers]
+    
+    # 拼接前导部分与展开项
+    result = prefix + '，'.join(expanded)
+    return result
+
 # %% 判断坐标区间相交
 
 def Interval_cross(a, b, extend=False):
@@ -386,13 +435,13 @@ def find_measure(Str):  # 提取测量值
         if type(row['关键词'])!=str:
             continue
         if row['属性']=="长度" and maxVal>0:
-            if maxVal>=row['最小值'] and maxVal<=row['最大值'] and re.search(row['关键词'],Str):
+            if maxVal>=row['最小值'] and maxVal<=row['最大值'] and re.search(rf"{row['关键词']}",Str):
                  positive=False
         if row['属性']=="百分比" and percent>0:
-            if percent>=row['最小值'] and percent<=row['最大值'] and re.search(row['关键词'],Str):
+            if percent>=row['最小值'] and percent<=row['最大值'] and re.search(rf"{row['关键词']}",Str):
                  positive=False
         if row['属性']=="体积" and volume>0:
-            if volume>=row['最小值'] and volume<=row['最大值'] and re.search(row['关键词'],Str):
+            if volume>=row['最小值'] and volume<=row['最大值'] and re.search(rf"{row['关键词']}",Str):
                  positive=False
     return (maxVal, percent,volume,positive)
 
@@ -403,7 +452,7 @@ def get_positive(item, debug=False):
     item['measure'],item['percent'],item['volume'],positive = find_measure(item['primary'])
     if item['measure'] > 0 or item['percent']>0 or item['volume'] > 0:
         return positive, item['measure'], item['percent'],item['volume']
-    if re.search(ignore_keywords, item['primary']):
+    if re.search(rf"{ignore_keywords}", item['primary']):
         return False, 0, 0,0
     sentence_list = re.split(",", re.sub(',现|,拟|,考虑', "", item['illness']))
     # sentence_list=re.split("[,，]",item['illness'])
@@ -414,11 +463,11 @@ def get_positive(item, debug=False):
         # print(len(item))
         if len(item) == 0:
             continue
-        if re.search(illness_words, item):
+        if re.search(rf"{illness_words}", item):
             if debug:
-                print(item, "in illness", re.search(illness_words, item))
+                print(item, "in illness", re.search(rf"{illness_words}", item))
             return True, 0.0, 0.0, 0.0
-        item=re.sub(stopwords, "", item,flags=re.I)
+        item=re.sub(rf"{stopwords}", "", item,flags=re.I)
         if item in absolute_illness:
             if debug:
                 print(absolute_illness)
@@ -447,7 +496,7 @@ def get_positive(item, debug=False):
 def starts_with_ignore(string):
     # 忽略句
     global Ignore_sentence
-    if re.search(Ignore_sentence, string,re.I):
+    if re.search(rf"{Ignore_sentence}", string,re.I):
         return True
     else:
         return False
@@ -633,16 +682,16 @@ def get_illness(sentence, pre_ReportStr):
         # 常规illness定义为最后一个word_end之后到句子结尾的字符
         illness = re.sub(
             punctuation, "", pre_ReportStr[illness_start:illness_end])
-        illness = re.sub("^\d[.|、]", "", illness)
+        illness = re.sub(r"^\d[.|、]", "", illness)
         # 处理否定前置，如“未见颅脑异常”，illness=“未见”+“异常”
         if sentence[-1]["start"] < sentence[-1]["word_start"]:
             if re.search(deny_words, pre_ReportStr[sentence[-1]["start"]:sentence[-1]["word_start"]]):
                 illness = re.sub(punctuation, "", pre_ReportStr[sentence[-1]["start"]:
                                                                 sentence[-1]["word_start"]])+illness
     # 处理完全倒置，如“血肿位于肾脏”,illness定义为句子开始到第一个word_start之间的字符
-    if re.sub(stopwords,"",illness) == ""  and sentence[0]["start"] < sentence[0]["word_start"]:
+    if re.sub(rf"{stopwords}","",illness) == ""  and sentence[0]["start"] < sentence[0]["word_start"]:
         front_illness = pre_ReportStr[sentence[0]["start"]:sentence[0]["word_start"]]
-        if len(re.sub(stopwords,"",front_illness))>len(re.sub(stopwords,"",illness)):
+        if len(re.sub(rf"{stopwords}","",front_illness))>len(re.sub(rf"{stopwords}","",illness)):
             illness=front_illness
     # 处理头尾都是关键词的情况
     if len(sentence) > 1 and ((len(illness) <= 2 and NormKey_pattern.search(illness)==None and illness not in sole_words) or illness==''):
@@ -734,7 +783,7 @@ def clean_mean_step2(process_list, ambiguity_list, add_info):
     # Iterate over each item in the ambiguity list
     for ambiguity in ambiguity_list:
         ambiguity_find = False
-        if re.search(spine_words,ambiguity[0]['primary']):
+        if re.search(rf"{spine_words}",ambiguity[0]['primary']):
             ambiguity=[x for x in ambiguity if "女性附件" not in x['partlist']]
         # 参考检查部位
         temp=[]
@@ -755,7 +804,7 @@ def clean_mean_step2(process_list, ambiguity_list, add_info):
             # Iterate over each adjacent part and try to disambiguate the current part
             for n in search_list:
                 adjacentPart = [p for p in process_list if p['index'] == n][0]
-                if re.search(spine_words,adjacentPart['primary']):
+                if re.search(rf"{spine_words}",adjacentPart['primary']):
                     ambiguity=[x for x in ambiguity if "女性附件" not in x['partlist']]
                 # temp = [x for x in ambiguity if x['position'] in adjacentPart['partlist'] or 
                 #                                 adjacentPart['position'] in x['partlist']]
@@ -796,7 +845,7 @@ def clean_mean_step2(process_list, ambiguity_list, add_info):
         if not ambiguity_find:
             # 优先部位作为根节点
             priority = [x for x in ambiguity if re.search(
-                second_root, x['position'])]
+                rf"{second_root}", x['position'])]
             if len(priority) > 0:
                 ambiguity[0]['partlist'] = tuple([priority[0]['position']])
                 ambiguity[0]['root'] = priority[0]['position']
@@ -830,7 +879,7 @@ def clean_mean_step3(df_process_list, pre_ReportStr, clean_sentence_list):
     for start in sentence_start:
         sentence = [x for x in df_process_list if x['start'] == start]
         illness = ""
-        replacement = re.sub("^\d[.|、]", "", sentence[0]['primary'])
+        replacement = re.sub(r"^\d[.|、]", "", sentence[0]['primary'])
         for s in sentence:
             s['primary'] = replacement
         if len(sentence) > 1:
@@ -886,7 +935,7 @@ def fill_orientation(data_dict,pre_ReportStr):
     # sentence_end = [match.start()
     #             for match in re.finditer(sentence_pattern, pre_ReportStr)]
     for i, part in enumerate(data_dict):
-        if part['orientation']=='' and re.search(dualparts," ".join(part['partlist'])):
+        if part['orientation']=='' and re.search(rf"{dualparts}"," ".join(part['partlist'])):
 
             for o in data_dict[i::-1]:
                 # if o['sentence_end']<=previous_end[-1]:
@@ -901,14 +950,27 @@ def fill_orientation(data_dict,pre_ReportStr):
                             break
     return data_dict
 
-def get_orientation_position(ReportStr: str, debug=False, title=False, match=False, add_info=[]):
+@lru_cache(maxsize=1000)
+def _get_orientation_position_cached(ReportStr: str, debug:bool, title:bool, match:bool, add_info_tuple:tuple):
+    add_info=list(add_info_tuple)
+    return get_orientation_position_original(ReportStr, debug, title, match, add_info)
+
+def get_orientation_position(ReportStr: str, debug=False, title=False, match=False, add_info=None):
+    if add_info is None:
+        add_info=[]
+    add_info_tuple=tuple(add_info)
+    return _get_orientation_position_cached(ReportStr, debug, title, match, add_info_tuple)
+    
+def get_orientation_position_original(ReportStr: str, debug=False, title=False, match=False, add_info=[]):
     """实体抽取主函数."""
     if debug:
         start_time = time.time()
-    #脊柱简写预处理
     if type(ReportStr)!=str or len(ReportStr)==0:
         return []
+    #脊柱简写预处理
     ReportStr=extend_spine_dot(spine_extend(disk_extend(ReportStr)))
+    #展开肋骨缩写形式
+    ReportStr=expand_ribbon(ReportStr)
     #print(ReportStr)
     pre_ReportStr = Str_replace(ReportStr, title)
 
@@ -916,25 +978,18 @@ def get_orientation_position(ReportStr: str, debug=False, title=False, match=Fal
     result = []
     if len(pre_ReportStr) == 0:
         return result
-    if not (re.search(stop_pattern, pre_ReportStr[-1])):
+    if not (re.search(rf"{stop_pattern}", pre_ReportStr[-1])):
         pre_ReportStr = pre_ReportStr+'\n'
     stops = [match.start()
              for match in re.finditer(stop_pattern, pre_ReportStr)]
     # sentences=re.split(stop_pattern,ReportStr)
     if match:
-        KGgraph = title_knowledgegraph
+        KGprocessors = titile_preprocessed_kg
     else:
-        KGgraph = knowledgegraph
-    for kg in KGgraph:
-        BodyProcessor=None
-        BodyProcessor = KeywordProcessor()
-        BodyProcessor.add_keywords_from_dict(kg)
-        allk=BodyProcessor.get_all_keywords()
-        keywords = BodyProcessor.extract_keywords(
-            pre_ReportStr, span_info=True)
-        if keywords != []:
-            # print("kg=",kg)
-            # print("keyword=",keywords)
+        KGprocessors = preprocessed_kg
+    for processor in KGprocessors:
+        keywords = processor.extract_keywords(pre_ReportStr, span_info=True)
+        if keywords :
             temp = GetPartTable(pre_ReportStr, keywords, stops)
             result += temp
     if len(result) == 0:
@@ -1013,20 +1068,35 @@ if __name__ == "__main__":
     # ReportStr = "肝胆脾：肝左叶低密度灶，所见如上述，必要时进一步检查，详请贵科阅片并密切结合临床考虑。"
     # ReportStr = "右胸锁关节较对侧稍肿胀并向前突出，双锁骨骨质未见明显异常，请结合临床。"
     # ReportStr = "双侧前根囊肿，退行性变"
-    # ReportStr = "肝胆系：胆囊可见结石"
+    ReportStr = """附见胆囊未见明确显示
+    """
 
-    ReportStr = """
-双侧额顶枕叶多发缺血灶。    
-双侧额叶白质小缺血灶"     """
+    # ReportStr = """
+    # D1未见斑块
+    # """
     StudyPart = """胸部/肺平扫，全腹部平扫"""
 #     ReportStr = """
-# 第腰2-4椎体，第2/3,3/4,4/5腰椎间盘，颈2,3,4椎体骨折
+# T管造影未见异常。
 #     """
     # studypart_analyze = get_orientation_position(StudyPart, title=True)
     # df = get_orientation_position(ReportStr,add_info=[s['axis'] for s in studypart_analyze])
-    df = get_orientation_position(ReportStr)
-    # pprint(df,compact=True)
-    pprint([(d["orientation"],d['partlist'],d['illness'],d['positive']) for d in  df])
+    df = get_orientation_position(ReportStr,debug=True)
+    print(df)
+    # print([(d["orientation"],d['partlist'],d['illness'],d['positive']) for d in  df])
+    reports=["第1-4肋骨",
+    "左侧第13-15腋肋骨折端对位对线尚可",
+    "1、2、3前肋",
+    "1、3-5后肋",
+    "10-12肋骨",
+    "2-4、6肋"]
+    # for r in reports:
+    #     df = get_orientation_position(r,debug=True)
+    #     # pprint(df,compact=True)
+    #     print([(d["orientation"],d['partlist'],d['illness'],d['positive']) for d in  df])
+    # start=time.time()
+    # df1 = get_orientation_position(ReportStr,debug=True)
+    # print("缓存速度:%.2f秒" %(time.time()-start))
+    # print([(d["orientation"],d['partlist'],d['illness'],d['positive']) for d in  df1])
     #print(disk_extend(ReportStr))
     # print(find_measure("胆总管直径17mm"))
     # studypart_analyze = get_orientation_position(StudyPart, title=True)

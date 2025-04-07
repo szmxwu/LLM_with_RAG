@@ -5,89 +5,167 @@ from PIL import Image
 from pptx import Presentation
 from docx import Document
 import io
-import zipfile
+import uuid
 import shutil
-from xml.etree import ElementTree as ET
-from pathlib import Path
 import subprocess
-def split_pptx(file_path, max_size=100 * 1024 * 1024):
-    """
-    将超过100M的PPTX文件转换为pdf再分拆上传。
-    """
-    slide_size = os.path.getsize(file_path)
-    if slide_size <= max_size :
-        return [file_path]
-    pdfpath="cache//"+os.path.splitext(os.path.basename(file_path))[0]+".pdf"
-    cmd=["soffice", "--headless", "--convert-to", "pdf:writer_pdf_Export",
-            file_path, "--outdir","cache"]
-    try:
-        subprocess.run(cmd,capture_output=True)
-    except Exception as e:
-        print(e)
-    if os.path.exists(pdfpath):
-        print("pdf convert succeeded.")
-        filepath=pdfpath
-    else:
-        print("pdf convert failed ")
-        return ""
-    slide_size = os.path.getsize(filepath)
-    if slide_size > max_size :     
-        return split_pdf(file_path)
-    else:
-        return [filepath]
+from io import BytesIO
+import logging
+class RAGFlowPptParser(object):
+    def __init__(self):
+        super().__init__()
 
-def split_pdf(file_path, max_size=100 * 1024 * 1024):
-    # 获取文件名和扩展名
-    file_name = os.path.basename(file_path)
-    file_name_without_extension, file_extension = os.path.splitext(file_name)
-    split_file_list=[]
-    # 检查文件扩展名是否为 .pdf
-    if file_extension.lower() != '.pdf':
-        print("文件不是 PDF 格式")
+    def __extract(self, shape):
+        if shape.shape_type == 19:
+            tb = shape.table
+            rows = []
+            for i in range(1, len(tb.rows)):
+                rows.append("; ".join([tb.cell(
+                    0, j).text + ": " + tb.cell(i, j).text for j in range(len(tb.columns)) if tb.cell(i, j)]))
+            return "\n".join(rows)
+
+        if shape.has_text_frame:
+            return shape.text_frame.text
+
+        if shape.shape_type == 6:
+            texts = []
+            for p in sorted(shape.shapes, key=lambda x: (x.top // 10, x.left)):
+                t = self.__extract(p)
+                if t:
+                    texts.append(t)
+            return "\n".join(texts)
+
+    def __call__(self, fnm, content, callback=None):
+        ppt = Presentation(fnm) if isinstance(
+            fnm, str) else Presentation(
+            BytesIO(fnm))
+        self.total_page = len(ppt.slides)
+        for i, slide in enumerate(ppt.slides):
+            if i < 0:
+                continue
+            if i >= 1024:
+                break
+            texts = []
+            for shape in sorted(
+                    slide.shapes, key=lambda x: ((x.top if x.top is not None else 0) // 10, x.left)):
+                try:
+                    txt = self.__extract(shape)
+                    if txt:
+                        texts.append(txt)
+                except Exception as e:
+                    logging.exception(e)
+                page_text="\n".join(texts)
+                if content in page_text:
+                    return i+1
         return None
-    
-    # 获取文件大小
-    file_size = os.path.getsize(file_path)
-    
-    # 检查文件大小是否大于 100MB
-    if file_size <= max_size:
-        print("文件大小不超过 100MB，无需拆分")
-        return [file_path]
-    
-    # 打开 PDF 文件
-    with open(file_path, 'rb') as pdf_file:
-        reader = PdfReader(pdf_file)
-        num_pages = len(reader.pages)
-        
-        # 初始化变量
-        current_page = 0
-        current_size = 0
-        file_counter = 1
-        
-        while current_page < num_pages:
-            writer = PdfWriter()
-            while current_page < num_pages and current_size + reader.pages[current_page].get_size() <= max_size:
-                writer.add_page(reader.pages[current_page])
-                current_size += reader.pages[current_page].get_size()
-                current_page += 1
-            
-            # 生成新的文件名
-            new_file_name = f"{file_name_without_extension}_{file_counter}{file_extension}"
-            new_file_path = os.path.join(os.path.dirname(file_path), new_file_name)
-            
-            # 写入新的 PDF 文件
-            with open(new_file_path, 'wb') as new_pdf_file:
-                writer.write(new_pdf_file)
-            split_file_list.append(new_file_path)
-            # 重置当前大小
-            current_size = 0
-            file_counter += 1
-            #重叠一页
-            if current_page>0:
-                current_page-=1
-            
-    print("PDF 文件拆分完成")
-    return split_file_list
+
+async def convert_pptx(file):
+    """
+    将PPT文件尽可能转化成word上传，保持内容的连续性。
+    """
+    english_path = str(uuid.uuid4()) + ".pptx"
+    dest=open(f"{english_path}","wb")
+    content=await file.read()
+    dest.write(content)
+    dest.close()
+    # 使用pptx2md将pptx转换为markdown
+    md_file = english_path.replace(".pptx", ".md")
+    result=None
+    try:
+        subprocess.run(["pptx2md", english_path,"-o", md_file], check=True)
+
+        # 使用pandoc将markdown转换为docx
+        docx_file = os.path.basename(file.filename).replace(".pptx", ".docx")
+        subprocess.run(
+            ["pandoc", md_file, "-o", docx_file], check=True)
+
+        # 删除中间生成的markdown文件
+        os.remove(md_file)
+        if os.path.exists('img'):
+            shutil.rmtree('img')
+        result=docx_file
+    except:
+        shutil.copyfile(file_path, os.path.join("cache",os.path.basename(file_path)))
+        dest=open(os.path.join("cache",file.filename),"wb")
+        dest.write(content)
+        dest.close()
+        result=file
+    #删除中间文件
+    os.remove(english_path)
+    return [result]
+
+def get_pdf_size(pdf_writer):
+    """获取当前PDF内容的大小（估算）"""
+    temp_file = BytesIO()
+    pdf_writer.write(temp_file)
+    return len(temp_file.getvalue()) / (1024 * 1024)  # 返回大小（MB）
+
+
+async def split_pdf(file):
+    # 检查文件是否为PDF格式
+    if not file.filename.lower().endswith('.pdf'):
+        return "错误：文件不是PDF格式"
+
+    # 获取文件大小，检查是否需要拆分
+    content=await file.read()
+    if file.size <= 100*1024 * 1024:
+        dest=open(f"cache//{file.filename}")
+        dest.write(content)
+        dest.close()
+        return [file]  # 如果文件小于等于100MB，拷贝到cache中并返回路径
+
+    # 打开PDF文件
+    print("正准备读取文件：")
+    pdf_stream=BytesIO(content)
+    print("正在读取文件：",pdf_stream)
+    pdf_reader = PdfReader(pdf_stream)
+    total_pages = len(pdf_reader.pages)
+    print("文件一共有:",total_pages)
+    sub_files = []  # 用于存储拆分后的文件路径
+    pdf_writer = PdfWriter()
+    base_name = os.path.splitext(os.path.basename(file.filename))[0]
+    sub_file_index = 1
+    last_page = None  # 用于存储上一页，保证重叠一页
+
+    # 遍历每一页，逐步拆分
+    for page_num in range(total_pages):
+        # 如果是拆分后的第一个子文件，直接添加
+        if last_page is None:
+            pdf_writer.add_page(pdf_reader.pages[page_num])
+        else:
+            # 如果是后续子文件，确保重叠一页
+            pdf_writer.add_page(last_page)
+            pdf_writer.add_page(pdf_reader.pages[page_num])
+
+        # 获取当前子文件的大小
+        current_size = get_pdf_size(pdf_writer)
+
+        # 如果当前子文件超过了100MB，则保存当前子文件并重新开始
+        if current_size > 100:
+            sub_file_path = f"cache//{base_name}_{sub_file_index}.pdf"
+            with open(sub_file_path, 'wb') as sub_file:
+                pdf_writer.write(sub_file)
+            sub_files.append(sub_file_path)
+
+            # 清空pdf_writer并开始新的一页
+            pdf_writer = PdfWriter()
+
+            # 保留当前页面作为下一个子文件的第一页
+            last_page = pdf_reader.pages[page_num]
+            sub_file_index += 1
+        else:
+            last_page = pdf_reader.pages[page_num]
+
+    # 最后一个子文件
+    if len(pdf_writer.pages) > 0:
+        sub_file_path = f"cache//{base_name}_{sub_file_index}.pdf"
+        with open(sub_file_path, 'wb') as sub_file:
+            pdf_writer.write(sub_file)
+        sub_files.append(sub_file_path)
+    print("完成拆分文件:",sub_files)
+    return sub_files
+
+
+
 
 
 
@@ -172,9 +250,15 @@ def pdf_page_to_image(pdf_path, page_number):
     
     # 关闭PDF文件
     pdf_document.close()
-    print(f"Page {page_number} from {pdf_path} saved as {image_path}")
+    # print(f"Page {page_number} from {pdf_path} saved as {image_path}")
     return image_path
 
+
+
+
+
+
+    
 if __name__ == '__main__':
 # 示例用法
     # split_pdf('5格-艾放射诊断学（第六版）\\1-（超高清晰版）格-艾放射诊断学（第六版）上卷.pdf', 'output_directory')
@@ -183,6 +267,11 @@ if __name__ == '__main__':
     # image_path = "output_page_2.png"
 
     # pdf_page_to_image(pdf_path, page_number, image_path)
-    file_path = 'F:\\big_pptx\\骨关节缺血坏死.pptx' # 替换为你的文件路径
-    result = split_pptx(file_path)
-    print(result)
+    # file_path = "H:\\output_directory\\pdf\\肿瘤影像诊断图谱.pdf"# 替换为你的文件路径
+    file_path="H:\\output_directory\\1-（超高清晰版）格-艾放射诊断学（第六版）上卷.pdf_1.docx"
+    # result = split_pdf(file_path)
+    # print(result)
+    input_docx = 'test.docx'  # 输入的 Word 文档路径
+    output_docx = 'output_document.docx'  # 输出的 Word 文档路径
+
+
