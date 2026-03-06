@@ -4,11 +4,12 @@ import asyncio
 import json
 import os
 import re
+import uuid
 from enum import Enum
 from typing import Optional, List, Dict, Any
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, WebSocket, WebSocketDisconnect, Form, UploadFile, File
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 
 from config.settings import settings, ThinkingMode
@@ -549,8 +550,16 @@ async def health_check():
 
 # ============= SQL分析API =============
 
+# 创建缓存目录
+CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'cache', 'sql_analysis')
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# 会话ID到输出文件的映射（简单内存存储，生产环境应使用Redis等）
+_output_file_map: Dict[str, str] = {}
+
+
 class SQLAnalysisRequest(BaseModel):
-    """SQL分析请求"""
+    """SQL分析请求（用于非文件上传场景）"""
     question: str = Field(
         ...,
         title="分析问题",
@@ -568,40 +577,89 @@ class SQLAnalysisRequest(BaseModel):
 @router.post(
     "/sql/analyze",
     response_class=StreamingResponse,
-    summary="SQL数据分析（流式）",
+    summary="SQL数据分析（流式）- 支持文件上传",
     description="""
-    <b>智能SQL数据分析Agent</b><br><br>
+    <b>智能SQL数据分析Agent - 支持Excel/CSV文件上传</b><br><br>
 
     高级特性：
+    • <b>文件上传</b>：支持上传Excel/CSV文件进行数据分析
     • <b>多步骤执行</b>：复杂查询自动分解为多个简单步骤
-    • <b>Python处理</b>：支持Python代码执行连接中间结果
+    • <b>数据库关联</b>：上传文件可与数据库关联查询
     • <b>流式输出</b>：实时返回执行进度
-    • <b>图表生成</b>：自动生成柱状图PNG（base64）
+    • <b>结果下载</b>：输出结果提供下载链接
+
+    请求方式：
+    • 表单提交（multipart/form-data）
+    • question: 分析需求描述（必填）
+    • session_id: 会话ID（可选）
+    • file: Excel/CSV文件（可选）
 
     返回事件类型：
     • <code>plan</code>：执行计划生成
     • <code>step_start</code>：步骤开始执行
     • <code>step_complete</code>：步骤执行完成
-    • <code>analysis</code>：数据分析中
-    • <code>final</code>：最终结果（包含数据和图表）
+    • <code>final</code>：最终结果（包含下载链接）
 
-    示例问题：
-    • "统计上个月各科室CT检查的人次和收入"
-    • "对比今年和去年同期MRI检查数量的变化"
-    • "找出检查等待时间最长的前10个科室"
+    示例：
+    ```bash
+    curl -X POST "http://localhost:6081/sql/analyze" \\
+      -F "question=查询这些检查号的报告结论" \\
+      -F "file=@/path/to/data.xlsx"
+    ```
 
     返回格式：text/event-stream（SSE流式）
     """
 )
-async def sql_analyze(request: SQLAnalysisRequest):
-    """SQL数据分析Agent - 支持多步骤复杂查询"""
+async def sql_analyze(
+    question: str = Form(..., description="分析需求描述"),
+    session_id: Optional[str] = Form(None, description="会话ID"),
+    file: Optional[Any] = Form(None, description="上传的Excel/CSV文件")
+):
+    """SQL数据分析Agent - 支持文件上传和多步骤复杂查询"""
+
+    # 处理上传的文件
+    uploaded_file_path = None
+    if file and hasattr(file, 'filename') and file.filename:
+        # 生成唯一文件名
+        import uuid
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        if file_ext not in ['.xlsx', '.xls', '.csv']:
+            raise HTTPException(status_code=400, detail=f"不支持的文件格式: {file_ext}，请上传 .xlsx, .xls 或 .csv 文件")
+
+        unique_name = f"{uuid.uuid4().hex}{file_ext}"
+        uploaded_file_path = os.path.join(CACHE_DIR, unique_name)
+
+        # 保存文件
+        content = await file.read()
+        with open(uploaded_file_path, 'wb') as f:
+            f.write(content)
+
+        # 在问题中添加上传文件的信息
+        question = f"""{question}
+
+【上传文件信息】
+文件路径: {uploaded_file_path}
+原始文件名: {file.filename}
+文件类型: {file_ext}
+"""
 
     async def generate():
         from agents.sql_analysis_agent import SQLAnalysisAgent
 
         agent = SQLAnalysisAgent()
+        output_file_path = None
+        current_session_id = session_id or str(uuid.uuid4())
 
-        async for event in agent.analyze(request.question, request.session_id):
+        async for event in agent.analyze(question, current_session_id):
+            # 如果是最终结果，添加下载链接
+            if event.get('type') == 'final' and event.get('data', {}).get('status') == 'success':
+                # 获取输出文件路径
+                output_file_path = event.get('data', {}).get('output_file', '')
+                if output_file_path and os.path.exists(output_file_path):
+                    # 保存到会话映射中
+                    _output_file_map[current_session_id] = output_file_path
+                    event['data']['download_url'] = f"/sql/download?session_id={current_session_id}"
+
             # 将事件转为JSON行
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
@@ -633,6 +691,43 @@ async def sql_simple(request: SQLAnalysisRequest):
     result = await pipeline.run(request.question)
 
     return JSONResponse(content=result)
+
+
+@router.get(
+    "/sql/download",
+    summary="下载SQL分析结果文件",
+    description="""
+    <b>下载SQL分析Agent生成的结果文件</b><br><br>
+
+    通过 /sql/analyze 接口返回的 download_url 获取此下载链接。<br>
+    文件格式为 Excel (.xlsx)，包含原始数据和查询结果。<br><br>
+
+    注意：
+    • 文件有效期为24小时
+    • 每个 session_id 只能下载一次（下载后文件会被删除）
+    """
+)
+async def sql_download(
+    session_id: str = Query(..., description="分析会话ID")
+):
+    """下载SQL分析结果文件"""
+    output_file = _output_file_map.get(session_id)
+
+    if not output_file or not os.path.exists(output_file):
+        raise HTTPException(status_code=404, detail="文件不存在或已过期")
+
+    # 获取原始文件名
+    original_name = os.path.basename(output_file)
+    if '_result.xlsx' in original_name:
+        download_name = f"分析结果_{original_name[:8]}.xlsx"
+    else:
+        download_name = original_name
+
+    return FileResponse(
+        path=output_file,
+        filename=download_name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 
 # ============= 病例检索路由 =============

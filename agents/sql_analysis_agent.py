@@ -1,79 +1,29 @@
 """
-SQL分析Agent - 支持多步骤执行和Python代码执行
+SQL分析Agent - 基于工具调用的简化架构
 
 设计特点：
-1. 支持复杂查询分解为多个简单步骤
-2. 中间结果保存到临时表
-3. Python代码执行能力用于连接中间结果
-4. 流式输出执行过程
-5. 最终生成图表PNG(base64)
-
-安全机制：
-1. 代码沙箱执行（受限环境）
-2. SQL只读权限（SELECT ONLY）
-3. 执行超时控制
-4. 资源使用限制
+1. 提供预定义工具（数据库查询、Excel读写、数据合并）
+2. LLM只负责生成SQL和决策，不生成复杂Python代码
+3. 工具执行由Agent控制，保证稳定性
+4. 数据库查询使用子进程隔离，避免TLS问题
 """
 
-import ast
+import asyncio
 import base64
 import io
 import json
 import os
-import re
+import subprocess
 import sys
 import time
 import traceback
 import tempfile
-from contextlib import redirect_stdout, redirect_stderr
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 import uuid
 
-# =============================================================================
-# 关键：必须在导入任何数据库模块之前配置TLS兼容性
-# 解决OpenSSL 3.0与SQL Server 2012的TLS兼容性问题
-# =============================================================================
-
-# 1. 先加载环境变量
-from dotenv import load_dotenv
-load_dotenv()
-
-# 2. 检测是否需要TLS兼容性配置
-odbc_str = os.getenv('ODBC', '')
-if 'mssql' in odbc_str.lower() or 'sql' in odbc_str.lower():
-    import ssl
-    openssl_version = ssl.OPENSSL_VERSION
-    version_parts = openssl_version.split()
-    for part in version_parts:
-        if part[0].isdigit():
-            major_version = int(part.split('.')[0])
-            if major_version >= 3:
-                # 创建OpenSSL配置文件
-                openssl_config = """# OpenSSL配置允许遗留算法
-openssl_conf = default_conf
-[default_conf]
-ssl_conf = ssl_sect
-[ssl_sect]
-system_default = system_default_sect
-[system_default_sect]
-CipherString = DEFAULT:@SECLEVEL=0
-"""
-                config_path = os.path.join(tempfile.gettempdir(), 'openssl-legacy.cnf')
-                with open(config_path, 'w') as f:
-                    f.write(openssl_config)
-                os.environ['OPENSSL_CONF'] = config_path
-                print(f"[TLS配置] 已设置OPENSSL_CONF以兼容SQL Server 2012: {config_path}")
-                break
-
-# 3. 现在导入数据库相关模块
-# 从config.tls_compat导入其他可能需要的配置
-from config.tls_compat import configure_tls_compatibility
-configure_tls_compatibility()
-
 import matplotlib
-matplotlib.use('Agg')  # 非交互式后端
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -83,211 +33,217 @@ from config.settings import settings
 
 
 @dataclass
-class ExecutionStep:
-    """执行步骤"""
-    step_id: str
-    step_type: str  # 'sql' | 'python' | 'analysis'
-    description: str
-    code: str  # SQL或Python代码
-    depends_on: List[str] = field(default_factory=list)
-
-@dataclass
-class StepResult:
-    """步骤执行结果"""
-    step_id: str
-    status: str  # 'success' | 'error' | 'skipped'
-    output: Any  # DataFrame或Python执行结果
-    execution_time_ms: float
+class ToolResult:
+    """工具执行结果"""
+    success: bool
+    data: Any
     error_message: Optional[str] = None
-    stdout: str = ""  # Python标准输出
     row_count: int = 0
+    execution_time_ms: float = 0
 
 
-class PythonSandbox:
-    """
-    Python代码沙箱执行环境
+class DatabaseTool:
+    """数据库查询工具 - 使用子进程隔离TLS问题"""
 
-    安全特性：
-    1. 限制可用的内置函数
-    2. 禁止危险操作（文件删除、网络等）
-    3. 执行超时控制
-    4. 资源使用监控
-    """
+    def __init__(self, connection_string: str):
+        self.connection_string = connection_string
 
-    # 允许的内置函数白名单
-    ALLOWED_BUILTINS = {
-        'abs', 'all', 'any', 'bin', 'bool', 'bytearray', 'bytes',
-        'chr', 'complex', 'dict', 'dir', 'divmod', 'enumerate',
-        'filter', 'float', 'format', 'frozenset', 'hasattr', 'hash',
-        'hex', 'int', 'isinstance', 'issubclass', 'iter', 'len',
-        'list', 'map', 'max', 'min', 'next', 'oct', 'ord',
-        'pow', 'print', 'range', 'repr', 'reversed', 'round',
-        'set', 'slice', 'sorted', 'str', 'sum', 'tuple', 'type',
-        'vars', 'zip', 'datetime', 'timedelta'
-    }
-
-    # 禁止的模块/函数模式
-    FORBIDDEN_PATTERNS = [
-        r'import\s+os\s+as',
-        r'import\s+sys',
-        r'import\s+subprocess',
-        r'__import__',
-        r'eval\s*\(',
-        r'exec\s*\(',
-        r'compile\s*\(',
-        r'open\s*\(',
-        r'file\s*\(',
-        r'remove\s*\(',
-        r'unlink\s*\(',
-        r'rmdir\s*\(',
-        r'system\s*\(',
-        r'popen',
-        r'fork',
-        r'kill',
-        r'execv',
-    ]
-
-    def __init__(self, timeout: int = 30):
-        self.timeout = timeout
-        self.globals_namespace = {}
-
-    def _create_safe_import(self):
-        """创建安全的导入函数"""
-        allowed_modules = {'pandas', 'json', 're', 'datetime', 'collections', 'itertools', 'math', 'statistics'}
-
-        def safe_import(name, *args, **kwargs):
-            # 获取顶级模块名
-            base_name = name.split('.')[0]
-            if base_name in allowed_modules:
-                return __import__(name, *args, **kwargs)
-            raise ImportError(f"导入模块 '{name}' 不被允许")
-
-        return safe_import
-
-    def _create_safe_globals(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """创建安全的全局命名空间"""
-        # 基础安全环境
-        safe_builtins = {k: v for k, v in __builtins__.items()
-                        if k in self.ALLOWED_BUILTINS}
-
-        # 添加安全的__import__
-        safe_builtins['__import__'] = self._create_safe_import()
-
-        safe_globals = {
-            '__builtins__': safe_builtins,
-            'pd': pd,
-            'json': json,
-            're': re,
-            'datetime': __import__('datetime'),
-        }
-
-        # 添加上下文变量（如前面步骤的结果）
-        safe_globals.update(context)
-
-        return safe_globals
-
-    def _validate_code(self, code: str) -> Tuple[bool, str]:
-        """验证代码安全性"""
-        # 检查禁止模式
-        for pattern in self.FORBIDDEN_PATTERNS:
-            if re.search(pattern, code, re.IGNORECASE):
-                return False, f"代码包含禁止的操作模式: {pattern}"
-
-        # 语法检查
-        try:
-            ast.parse(code)
-        except SyntaxError as e:
-            return False, f"语法错误: {str(e)}"
-
-        return True, ""
-
-    def execute(self, code: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        """
-        执行Python代码
-
-        Args:
-            code: Python代码字符串
-            context: 上下文变量（如前面步骤的结果DataFrame）
-
-        Returns:
-            {
-                'success': bool,
-                'result': Any,  # 最后一个表达式的值或None
-                'stdout': str,  # 标准输出捕获
-                'stderr': str,  # 标准错误
-                'error': str    # 错误信息（如果有）
-            }
-        """
-        context = context or {}
-
-        # 安全验证
-        is_safe, error_msg = self._validate_code(code)
-        if not is_safe:
-            return {
-                'success': False,
-                'result': None,
-                'stdout': '',
-                'stderr': '',
-                'error': f"安全验证失败: {error_msg}"
-            }
-
-        # 创建安全环境
-        safe_globals = self._create_safe_globals(context)
-
-        # 捕获输出
-        stdout_buffer = io.StringIO()
-        stderr_buffer = io.StringIO()
-
+    async def execute(self, sql: str, timeout: int = 30) -> ToolResult:
+        """执行SQL查询"""
         start_time = time.time()
 
         try:
-            # 执行代码
-            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-                # 使用exec执行
-                exec(code, safe_globals)
+            script_path = os.path.join(
+                os.path.dirname(__file__), '..', 'sql_executor_subprocess.py'
+            )
+            script_path = os.path.abspath(script_path)
 
-                # 尝试获取最后一个表达式的值（如果是表达式）
-                result = None
-                if code.strip():
-                    try:
-                        # 尝试作为表达式求值
-                        result = eval(code.strip().split('\n')[-1], safe_globals)
-                    except:
-                        pass
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, script_path, self.connection_string, sql,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
             execution_time = (time.time() - start_time) * 1000
 
-            return {
-                'success': True,
-                'result': result,
-                'stdout': stdout_buffer.getvalue(),
-                'stderr': stderr_buffer.getvalue(),
-                'error': None,
-                'execution_time_ms': execution_time
-            }
+            if proc.returncode != 0:
+                error_msg = stderr.decode('utf-8', errors='replace')[:500]
+                return ToolResult(
+                    success=False,
+                    data=None,
+                    error_message=f"子进程执行失败: {error_msg}",
+                    execution_time_ms=execution_time
+                )
 
+            stdout_text = stdout.decode('utf-8', errors='replace')
+
+            # 检查子进程是否有错误输出
+            if stderr:
+                stderr_text = stderr.decode('utf-8', errors='replace')
+                if stderr_text.strip():
+                    print(f"[SQL Subprocess STDERR] {stderr_text[:500]}")
+
+            try:
+                result = json.loads(stdout_text)
+            except json.JSONDecodeError as e:
+                print(f"[SQL Subprocess JSON Error] {e}, stdout: {stdout_text[:500]}")
+                return ToolResult(
+                    success=False,
+                    data=None,
+                    error_message=f"子进程输出解析失败: {e}",
+                    execution_time_ms=execution_time
+                )
+
+            if not result.get('success'):
+                error_msg = result.get('error', '未知错误')
+                print(f"[SQL Subprocess Error] {error_msg[:500]}")
+                return ToolResult(
+                    success=False,
+                    data=None,
+                    error_message=error_msg,
+                    execution_time_ms=execution_time
+                )
+
+            df = pd.DataFrame(result.get('data', []), columns=result.get('columns', []))
+            return ToolResult(
+                success=True,
+                data=df,
+                row_count=len(df),
+                execution_time_ms=execution_time
+            )
+
+        except asyncio.TimeoutError:
+            return ToolResult(
+                success=False,
+                data=None,
+                error_message="SQL执行超时",
+                execution_time_ms=(time.time() - start_time) * 1000
+            )
         except Exception as e:
-            execution_time = (time.time() - start_time) * 1000
+            return ToolResult(
+                success=False,
+                data=None,
+                error_message=str(e),
+                execution_time_ms=(time.time() - start_time) * 1000
+            )
 
-            return {
-                'success': False,
-                'result': None,
-                'stdout': stdout_buffer.getvalue(),
-                'stderr': stderr_buffer.getvalue(),
-                'error': f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-            }
+
+class ExcelTool:
+    """Excel文件操作工具"""
+
+    @staticmethod
+    def read(file_path: str) -> ToolResult:
+        """读取Excel文件"""
+        start_time = time.time()
+        try:
+            df = pd.read_excel(file_path)
+            return ToolResult(
+                success=True,
+                data=df,
+                row_count=len(df),
+                execution_time_ms=(time.time() - start_time) * 1000
+            )
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                data=None,
+                error_message=f"读取Excel失败: {str(e)}",
+                execution_time_ms=(time.time() - start_time) * 1000
+            )
+
+    @staticmethod
+    def write(df: pd.DataFrame, file_path: str) -> ToolResult:
+        """写入Excel文件"""
+        start_time = time.time()
+        try:
+            df.to_excel(file_path, index=False)
+            return ToolResult(
+                success=True,
+                data=file_path,
+                row_count=len(df),
+                execution_time_ms=(time.time() - start_time) * 1000
+            )
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                data=None,
+                error_message=f"写入Excel失败: {str(e)}",
+                execution_time_ms=(time.time() - start_time) * 1000
+            )
+
+
+class DataTool:
+    """数据处理工具"""
+
+    @staticmethod
+    def merge(left_df: pd.DataFrame, right_df: pd.DataFrame,
+              left_on: str, right_on: str = None,
+              how: str = 'left') -> ToolResult:
+        """合并两个DataFrame，确保保留left_df的所有行"""
+        start_time = time.time()
+        try:
+            right_on = right_on or left_on
+
+            # 如果right_df有重复，先按left_on去重（保留第一条）
+            if right_df.duplicated(subset=[right_on]).any():
+                print(f"[DataTool] 检测到数据库结果中有重复{right_on}，进行去重")
+                right_df = right_df.drop_duplicates(subset=[right_on], keep='first')
+
+            merged = left_df.merge(
+                right_df, left_on=left_on, right_on=right_on, how=how
+            )
+
+            # 确保合并后行数与left_df相同
+            if len(merged) != len(left_df):
+                print(f"[DataTool] 警告: 合并后行数({len(merged)})与原始Excel({len(left_df)})不一致")
+
+            return ToolResult(
+                success=True,
+                data=merged,
+                row_count=len(merged),
+                execution_time_ms=(time.time() - start_time) * 1000
+            )
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                data=None,
+                error_message=f"合并数据失败: {str(e)}",
+                execution_time_ms=(time.time() - start_time) * 1000
+            )
+
+    @staticmethod
+    def add_column(df: pd.DataFrame, column_name: str, values: List) -> ToolResult:
+        """添加列到DataFrame"""
+        start_time = time.time()
+        try:
+            df_copy = df.copy()
+            df_copy[column_name] = values
+            return ToolResult(
+                success=True,
+                data=df_copy,
+                row_count=len(df_copy),
+                execution_time_ms=(time.time() - start_time) * 1000
+            )
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                data=None,
+                error_message=f"添加列失败: {str(e)}",
+                execution_time_ms=(time.time() - start_time) * 1000
+            )
 
 
 class SQLAnalysisAgent:
     """
-    SQL分析Agent - 支持多步骤复杂查询
+    SQL分析Agent - 基于工具调用架构
 
     核心能力：
-    1. 查询分解：将复杂需求分解为多个简单SQL步骤
-    2. 中间存储：使用临时表保存中间结果
-    3. Python处理：使用Python连接、转换中间结果
-    4. 流式输出：实时返回执行进度
-    5. 图表生成：自动生成PNG图表（base64）
+    1. Excel读取：使用ExcelTool.read
+    2. 数据库查询：使用DatabaseTool.execute（子进程隔离）
+    3. 数据合并：使用DataTool.merge/add_column
+    4. Excel写入：使用ExcelTool.write
     """
 
     def __init__(self):
@@ -298,262 +254,224 @@ class SQLAnalysisAgent:
             temperature=0.1,
             max_tokens=4096,
         )
-        self.sandbox = PythonSandbox(timeout=30)
-        self._steps_history: List[ExecutionStep] = []
-        self._results_cache: Dict[str, StepResult] = {}
+        self.db_tool = DatabaseTool(settings.odbc_connection)
+        self._db_schema = self._load_db_schema()
 
-    async def _generate_execution_plan(self, question: str) -> List[ExecutionStep]:
+    def _load_db_schema(self) -> str:
+        """加载数据库结构提示词"""
+        try:
+            prompt_path = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                'prompt', 'sql_prompt.json'
+            )
+            with open(prompt_path, 'r', encoding='utf-8') as f:
+                prompt_data = json.load(f)
+                template = prompt_data.get('template', '')
+                # 提取数据库信息部分
+                if '## 数据库信息:' in template:
+                    schema = template.split('## 数据库信息:')[1].split('## 生成SQL的步骤:')[0]
+                    return schema.strip()
+                return template
+        except Exception as e:
+            print(f"[Warning] 无法加载数据库结构: {e}")
+            # 返回基础表结构
+            return """
+### 检查信息表(tRegorder)
+- `AccNo`: 字符串类型，检查流水号
+- `CurPatientName`: 字符串类型，患者中文名字
+- `ApplyDept`: 字符串类型，申请科室名称
+- `OrderGuid`: 字符串类型，检查信息的全局唯一标识符
+
+### 检查报告表(tReport)
+- `ReportGuid`: 字符串类型，报告全局唯一标识符
+- `WYSText`: 字符串类型，检查报告中的描述内容
+- `WYGText`: 字符串类型，检查报告中的结论内容
+- `CreateDt`: 时间戳类型，报告提交时间
+
+### 检查流程表(tRegProcedure)
+- `OrderGuid`: 字符串类型，关联tRegorder
+- `ReportGuid`: 字符串类型，关联tReport
+- `CheckingItem`: 字符串类型，检查部位项目名称
+- `ModalityType`: 字符串类型，设备类型[DR,CT,MR,MG]
+"""
+
+    def _extract_file_path(self, question: str) -> Optional[str]:
+        """从question中提取文件路径"""
+        import re
+        # 匹配常见的文件路径模式
+        patterns = [
+            r'读取Excel文件[：:]\s*(\S+)',
+            r'文件路径[：:]\s*(\S+)',
+            r'([\w/\\]+\.xlsx?)',
+            r'([\w/\\]+\.csv)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, question)
+            if match:
+                return match.group(1)
+        return None
+
+    def _parse_uploaded_file(self, question: str) -> tuple:
+        """从question中解析上传文件信息"""
+        import re
+
+        file_path = None
+        original_name = None
+
+        # 匹配上传文件信息
+        path_match = re.search(r'文件路径:\s*(\S+)', question)
+        name_match = re.search(r'原始文件名:\s*(\S+)', question)
+
+        if path_match:
+            file_path = path_match.group(1)
+        if name_match:
+            original_name = name_match.group(1)
+
+        return file_path, original_name
+
+    async def _analyze_task(self, question: str) -> Dict[str, Any]:
         """
-        生成执行计划
+        分析任务，生成执行计划
 
-        分析用户需求，决定是单步执行还是多步执行
+        LLM只负责：
+        1. 判断需要哪些步骤
+        2. 指定表名、列名、文件路径（简单字符串）
+        3. 不生成复杂SQL，只指定查询条件
         """
-        prompt = f"""你是一个SQL查询规划专家。请分析用户需求，决定如何执行。
+        # 解析上传文件信息
+        uploaded_file, original_name = self._parse_uploaded_file(question)
 
-用户需求：{question}
+        # 确定输出路径
+        if uploaded_file:
+            # 使用上传文件所在目录作为输出目录
+            import uuid
+            output_dir = os.path.dirname(uploaded_file)
+            output_path = os.path.join(output_dir, f"{uuid.uuid4().hex}_result.xlsx")
+            file_path = uploaded_file
+        else:
+            # 从question中提取文件路径或使用默认路径
+            file_path = self._extract_file_path(question) or ""
+            output_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4().hex}_result.xlsx")
 
-请判断：
-1. 这个需求是否可以用单条SQL完成？
-2. 如果需要多步，应该分解为哪些步骤？
+        prompt = f"""你是一个数据分析助手。请分析用户需求，生成执行计划。
 
-输出格式（JSON）：
+可用工具：
+1. read_excel(file_path) - 读取Excel文件
+2. query_database(table, columns, filter_column) - 查询数据库
+3. merge_data(left_var, right_var, on_column) - 合并数据
+4. write_excel(file_path) - 保存Excel
+
+用户需求：
+{question}
+
+请分析需求并输出JSON格式的执行计划：
 {{
-    "is_complex": true/false,
-    "reason": "为什么需要多步/单步",
-    "steps": [
-        {{
-            "step_id": "step_1",
-            "step_type": "sql",
-            "description": "步骤描述",
-            "code": "SQL代码"
-        }},
-        {{
-            "step_id": "step_2",
-            "step_type": "python",
-            "description": "用Python处理上一步结果",
-            "code": "Python代码，可以使用df_step_1访问上一步结果",
-            "depends_on": ["step_1"]
-        }}
-    ]
+    "task_type": "excel_sql_merge",
+    "file_path": "输入Excel文件路径",
+    "output_path": "输出Excel文件路径",
+    "tables": ["需要查询的数据库表名列表"],
+    "columns": ["需要查询的列名"],
+    "join_column": "用于关联的列名（如AccNo）"
 }}
 
+当前上下文：
+- 输入文件路径: {file_path}
+- 输出文件路径: {output_path}
+
 注意：
-- 优先使用单条SQL，只有复杂需求才分解
-- Python步骤可以使用前面SQL步骤的结果（变量名为 df_ + step_id）
-- 最后一步应该生成最终分析结果"""
+- 只输出JSON，不要包含任何代码或解释
+- 如果用户上传了文件，使用提供的输入文件路径
+- 输出文件路径已提供，请在计划中使用
+- 表名和列名使用原始名称"""
 
         messages = [
-            SystemMessage(content="你是SQL查询规划专家。只输出JSON格式的执行计划。"),
+            SystemMessage(content="你是数据分析助手。只输出JSON格式的执行计划。"),
             HumanMessage(content=prompt)
         ]
 
         response = await self.llm.ainvoke(messages)
 
-        # 提取JSON
         try:
             content = response.content
-            # 尝试提取JSON块
+
+            # 去除think标签
+            if '<think>' in content and '</think>' in content:
+                content = content.split('</think>')[1]
+
+            # 提取JSON
             if '```json' in content:
                 content = content.split('```json')[1].split('```')[0]
             elif '```' in content:
                 content = content.split('```')[1].split('```')[0]
 
             plan = json.loads(content.strip())
-
-            steps = []
-            for step_data in plan.get('steps', []):
-                steps.append(ExecutionStep(
-                    step_id=step_data['step_id'],
-                    step_type=step_data['step_type'],
-                    description=step_data['description'],
-                    code=step_data['code'],
-                    depends_on=step_data.get('depends_on', [])
-                ))
-
-            return steps
+            return plan
 
         except Exception as e:
-            # 降级：生成单步计划
-            return [ExecutionStep(
-                step_id="step_1",
-                step_type="sql",
-                description="直接查询",
-                code="",  # 将在执行时生成
-                depends_on=[]
-            )]
+            print(f"[Plan Error] {e}, raw: {response.content[:500]}")
+            # 返回默认计划
+            return {
+                "task_type": "unknown",
+                "steps": []
+            }
 
-    async def _execute_sql_step(
-        self,
-        step: ExecutionStep,
-        context: Dict[str, Any]
-    ) -> StepResult:
-        """执行SQL步骤 - 使用子进程隔离执行以避免TLS配置问题"""
-        import subprocess
-        import asyncio
+    async def _generate_sql_for_accnos(self, accnos: List[str], columns_info: str) -> str:
+        """
+        为给定的AccNo列表生成批量查询SQL
 
-        start_time = time.time()
+        使用数据库结构提示词让LLM生成正确的SQL
+        """
+        # 构建IN子句（限制数量避免SQL过长）
+        accnos_list = [f"'{a}'" for a in accnos[:300]]  # 最多300个，避免SQL过长
+        in_clause = ', '.join(accnos_list)
 
-        try:
-            # 如果code为空，需要生成SQL
-            if not step.code.strip():
-                from tools.sql_agent import SQLGenerationAgent
-                sql_agent = SQLGenerationAgent()
-                gen_result = await sql_agent.generate_sql(context.get('question', ''))
-                sql_code = gen_result.sql
-            else:
-                sql_code = step.code
+        prompt = f"""根据以下数据库结构，生成SQL Server查询语句。
 
-            # 替换上下文变量
-            for var_name, var_value in context.items():
-                if isinstance(var_value, pd.DataFrame):
-                    placeholder = f"{{{{{var_name}}}}}"
-                    if placeholder in sql_code:
-                        pass
+## 数据库结构:
+{self._db_schema}
 
-            # 在子进程中执行SQL（避免主进程的TLS配置问题）
-            script_path = os.path.join(os.path.dirname(__file__), '..', 'sql_executor_subprocess.py')
-            script_path = os.path.abspath(script_path)
+## 查询需求:
+查询给定AccNo列表对应的数据。
+需要查询的字段: {columns_info}
+AccNo列表: {in_clause[:300]}...
 
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, script_path, settings.odbc_connection, sql_code,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
+## 重要规则:
+1. 使用正确的表名和字段名
+2. 如果涉及多个表，使用JOIN关联（tRegorder通过OrderGuid关联tRegProcedure，tRegProcedure通过ReportGuid关联tReport）
+3. 使用IN子句筛选AccNo
+4. **不要添加日期范围限制** - 因为已经提供了具体的AccNo列表，这些是唯一标识符，不需要再用日期筛选
+5. 只输出SQL语句，不要解释
 
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+## SQL:"""
 
-            if proc.returncode != 0:
-                error_msg = stderr.decode('utf-8', errors='replace') or stdout.decode('utf-8', errors='replace')
-                execution_time = (time.time() - start_time) * 1000
-                return StepResult(
-                    step_id=step.step_id,
-                    status='error',
-                    output=None,
-                    execution_time_ms=execution_time,
-                    error_message=f"子进程执行失败: {error_msg[:200]}",
-                    row_count=0
-                )
+        messages = [
+            SystemMessage(content="你是SQL Server专家。根据数据库结构生成正确的查询语句。"),
+            HumanMessage(content=prompt)
+        ]
 
-            result = json.loads(stdout.decode('utf-8'))
+        response = await self.llm.ainvoke(messages)
+        content = response.content.strip()
 
-            if not result.get('success'):
-                execution_time = (time.time() - start_time) * 1000
-                return StepResult(
-                    step_id=step.step_id,
-                    status='error',
-                    output=None,
-                    execution_time_ms=execution_time,
-                    error_message=result.get('error', '未知错误'),
-                    row_count=0
-                )
+        # 去除think标签（Qwen模型）
+        if '<think>' in content and '</think>' in content:
+            content = content.split('</think>')[1]
 
-            # 转换结果为DataFrame
-            df = pd.DataFrame(result.get('data', []), columns=result.get('columns', []))
-            execution_time = (time.time() - start_time) * 1000
+        # 提取SQL代码块
+        if '```sql' in content:
+            content = content.split('```sql')[1].split('```')[0]
+        elif '```' in content:
+            content = content.split('```')[1].split('```')[0]
 
-            return StepResult(
-                step_id=step.step_id,
-                status='success',
-                output=df,
-                execution_time_ms=execution_time,
-                row_count=result.get('row_count', 0)
-            )
+        sql = content.strip()
 
-        except asyncio.TimeoutError:
-            execution_time = (time.time() - start_time) * 1000
-            return StepResult(
-                step_id=step.step_id,
-                status='error',
-                output=None,
-                execution_time_ms=execution_time,
-                error_message="SQL执行超时",
-                row_count=0
-            )
+        # 清理SQL中的注释和多余空白
+        import re
+        sql = re.sub(r'--.*?$', '', sql, flags=re.MULTILINE)  # 移除单行注释
+        sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)  # 移除多行注释
+        sql = ' '.join(sql.split())  # 规范化空白
 
-        except Exception as e:
-            execution_time = (time.time() - start_time) * 1000
-            return StepResult(
-                step_id=step.step_id,
-                status='error',
-                output=None,
-                execution_time_ms=execution_time,
-                error_message=str(e),
-                row_count=0
-            )
-
-    async def _execute_python_step(
-        self,
-        step: ExecutionStep,
-        context: Dict[str, Any]
-    ) -> StepResult:
-        """执行Python步骤"""
-        start_time = time.time()
-
-        # 准备上下文（前面步骤的结果）
-        python_context = {}
-        for var_name, var_value in context.items():
-            if isinstance(var_value, pd.DataFrame):
-                python_context[var_name] = var_value
-
-        # 执行代码
-        result = self.sandbox.execute(step.code, python_context)
-
-        execution_time = (time.time() - start_time) * 1000
-
-        # 获取结果（最后一个变量或result变量）
-        output = result.get('result')
-        if output is None and 'result' in result.get('globals', {}):
-            output = result['globals']['result']
-
-        return StepResult(
-            step_id=step.step_id,
-            status='success' if result['success'] else 'error',
-            output=output,
-            execution_time_ms=execution_time,
-            error_message=result.get('error'),
-            stdout=result.get('stdout', ''),
-            row_count=len(output) if isinstance(output, pd.DataFrame) else 0
-        )
-
-    def _generate_chart_base64(self, df: pd.DataFrame, config: Dict[str, Any]) -> Optional[str]:
-        """生成图表PNG并转为base64"""
-        try:
-            if df.empty or len(df) == 0:
-                return None
-
-            # 清除之前的图
-            plt.clf()
-            plt.close('all')
-
-            # 创建新图
-            fig, ax = plt.subplots(figsize=(10, 6))
-
-            x_col = config.get('x_axis', df.columns[0] if len(df.columns) > 0 else None)
-            y_col = config.get('y_axis', df.columns[1] if len(df.columns) > 1 else df.columns[0])
-
-            if x_col and y_col and x_col in df.columns and y_col in df.columns:
-                # 绘制柱状图
-                df.plot(x=x_col, y=y_col, kind='bar', ax=ax)
-                ax.set_title(config.get('title', '数据分析'))
-                ax.set_xlabel(x_col)
-                ax.set_ylabel(y_col)
-                plt.xticks(rotation=45, ha='right')
-                plt.tight_layout()
-
-                # 转为base64
-                buffer = io.BytesIO()
-                fig.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
-                buffer.seek(0)
-                image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
-                plt.close(fig)
-
-                return image_base64
-
-            return None
-
-        except Exception as e:
-            print(f"图表生成失败: {e}")
-            return None
+        print(f"[Generated SQL] {sql[:300]}...")
+        return sql
 
     async def analyze(
         self,
@@ -562,173 +480,205 @@ class SQLAnalysisAgent:
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         执行分析流程（流式输出）
-
-        Yields:
-            {
-                'type': 'plan' | 'step_start' | 'step_progress' | 'step_complete' | 'analysis' | 'chart' | 'final',
-                'data': {...}
-            }
         """
         session_id = session_id or str(uuid.uuid4())
 
-        # 步骤1: 生成执行计划
-        yield {
-            'type': 'plan',
-            'data': {
-                'status': 'generating',
-                'message': '正在分析需求并生成执行计划...'
-            }
-        }
+        # 步骤1: 分析任务
+        yield {'type': 'analysis', 'data': {'stage': 'analyzing', 'message': '分析任务需求...'}}
 
-        steps = await self._generate_execution_plan(question)
+        plan = await self._analyze_task(question)
+
+        if not plan.get('file_path') or not plan.get('tables'):
+            yield {'type': 'error', 'data': {'message': '无法生成执行计划'}}
+            return
+
+        # 构建执行步骤
+        steps = [
+            {'step': 1, 'tool': 'read_excel', 'desc': f"读取Excel: {plan.get('file_path', '')}"},
+            {'step': 2, 'tool': 'query_database', 'desc': f"查询数据库表: {', '.join(plan.get('tables', []))}"},
+            {'step': 3, 'tool': 'merge_data', 'desc': f"合并数据（关联列: {plan.get('join_column', '')}）"},
+            {'step': 4, 'tool': 'write_excel', 'desc': f"保存Excel: {plan.get('output_path', '')}"}
+        ]
 
         yield {
             'type': 'plan',
             'data': {
                 'status': 'complete',
                 'steps_count': len(steps),
-                'steps': [{'id': s.step_id, 'type': s.step_type, 'desc': s.description} for s in steps]
+                'steps': steps
             }
         }
 
-        # 步骤2: 依次执行每个步骤
-        context = {'question': question}
-        step_results = {}
+        # 步骤2: 执行各步骤
+        context = {}  # 存储中间结果
+        total_time = 0
 
-        for step in steps:
-            # 检查依赖
-            for dep in step.depends_on:
-                if dep not in step_results:
-                    yield {
-                        'type': 'error',
-                        'data': {
-                            'message': f"步骤 {step.step_id} 依赖 {dep} 未完成"
-                        }
-                    }
-                    return
+        # Step 1: 读取Excel
+        yield {'type': 'step_start', 'data': {'step_id': '1', 'tool': 'read_excel', 'description': '读取Excel文件'}}
 
-            # 开始执行
-            yield {
-                'type': 'step_start',
-                'data': {
-                    'step_id': step.step_id,
-                    'step_type': step.step_type,
-                    'description': step.description
-                }
-            }
+        result = ExcelTool.read(plan['file_path'])
+        total_time += result.execution_time_ms
 
-            # 执行
-            if step.step_type == 'sql':
-                result = await self._execute_sql_step(step, context)
-                # 保存结果到上下文
-                context[f'df_{step.step_id}'] = result.output
-            elif step.step_type == 'python':
-                result = await self._execute_python_step(step, context)
-                # 如果结果是DataFrame，保存到上下文
-                if isinstance(result.output, pd.DataFrame):
-                    context[f'df_{step.step_id}'] = result.output
-            else:
-                result = StepResult(
-                    step_id=step.step_id,
-                    status='error',
-                    output=None,
-                    execution_time_ms=0,
-                    error_message=f"未知步骤类型: {step.step_type}"
-                )
+        if not result.success:
+            yield {'type': 'step_complete', 'data': {'step_id': '1', 'status': 'error', 'error_message': result.error_message}}
+            yield {'type': 'error', 'data': {'message': f"读取Excel失败: {result.error_message}"}}
+            return
 
-            step_results[step.step_id] = result
+        df_excel = result.data
+        context['df_excel'] = df_excel
 
-            # 输出结果
-            yield {
-                'type': 'step_complete',
-                'data': {
-                    'step_id': step.step_id,
-                    'status': result.status,
-                    'execution_time_ms': result.execution_time_ms,
-                    'row_count': result.row_count,
-                    'error_message': result.error_message,
-                    'stdout': result.stdout if step.step_type == 'python' else None
-                }
-            }
+        # 获取AccNo列表
+        join_column = plan.get('join_column', 'AccNo')
+        if join_column in df_excel.columns:
+            context['accnos'] = df_excel[join_column].dropna().unique().tolist()
+        else:
+            context['accnos'] = []
 
-            # 如果出错，停止执行
-            if result.status == 'error':
-                yield {
-                    'type': 'error',
-                    'data': {
-                        'message': f"步骤 {step.step_id} 执行失败: {result.error_message}"
-                    }
-                }
-                return
+        yield {'type': 'step_complete', 'data': {'step_id': '1', 'status': 'success', 'row_count': result.row_count, 'execution_time_ms': result.execution_time_ms}}
 
-        # 步骤3: 获取最终结果
-        final_step = steps[-1] if steps else None
-        final_result = step_results.get(final_step.step_id) if final_step else None
+        # Step 2: 查询数据库（让LLM生成正确的SQL）
+        yield {'type': 'step_start', 'data': {'step_id': '2', 'tool': 'query_database', 'description': '查询数据库'}}
 
-        if final_result and isinstance(final_result.output, pd.DataFrame):
-            df = final_result.output
+        accnos = context.get('accnos', [])[:300]  # 限制数量避免SQL过长
 
-            # 生成分析总结
-            yield {
-                'type': 'analysis',
-                'data': {
-                    'status': 'generating',
-                    'message': '正在生成数据分析和可视化...'
-                }
-            }
+        if not accnos:
+            yield {'type': 'step_complete', 'data': {'step_id': '2', 'status': 'error', 'error_message': '没有有效的AccNo用于查询'}}
+            yield {'type': 'error', 'data': {'message': 'Excel文件中没有有效的AccNo'}}
+            return
 
-            # 生成图表配置
-            from tools.sql_agent import VisualizationAgent
-            viz_agent = VisualizationAgent()
-            viz_config = await viz_agent.generate_config(df, question, "")
+        # 根据问题内容决定查询哪些字段
+        columns_info = "AccNo"
+        question_lower = question.lower()
+        if any(k in question_lower for k in ['报告', '结论', '诊断', 'wys', 'wyg']):
+            columns_info += ", 报告描述(WYSText)和报告结论(WYGText)"
+        if any(k in question_lower for k in ['检查时间', '检查日期', '时间']):
+            columns_info += ", 检查时间(CreateDt或ExamineDt)"
+        if any(k in question_lower for k in ['患者', '姓名', '病人']):
+            columns_info += ", 患者姓名(CurPatientName)"
+        if any(k in question_lower for k in ['科室', '申请']):
+            columns_info += ", 申请科室(ApplyDept)"
 
-            # 生成图表PNG
-            chart_base64 = self._generate_chart_base64(df, {
-                'x_axis': viz_config.x_axis,
-                'y_axis': viz_config.y_axis,
-                'title': viz_config.title
-            })
+        # 让LLM生成正确的SQL
+        sql = await self._generate_sql_for_accnos(accnos, columns_info)
+        print(f"[SQL] {sql[:300]}...")
 
-            # 最终输出
+        result = await self.db_tool.execute(sql)
+        total_time += result.execution_time_ms
+
+        if not result.success:
+            yield {'type': 'step_complete', 'data': {'step_id': '2', 'status': 'error', 'error_message': result.error_message}}
+            yield {'type': 'error', 'data': {'message': f"数据库查询失败: {result.error_message}"}}
+            return
+
+        context['df_db'] = result.data
+
+        yield {'type': 'step_complete', 'data': {'step_id': '2', 'status': 'success', 'row_count': len(context['df_db']), 'execution_time_ms': total_time}}
+
+        # Step 3: 合并数据
+        yield {'type': 'step_start', 'data': {'step_id': '3', 'tool': 'merge_data', 'description': '合并Excel和数据库数据'}}
+
+        result = DataTool.merge(df_excel, context['df_db'], join_column, join_column, 'left')
+        total_time += result.execution_time_ms
+
+        if not result.success:
+            yield {'type': 'step_complete', 'data': {'step_id': '3', 'status': 'error', 'error_message': result.error_message}}
+            yield {'type': 'error', 'data': {'message': f"合并数据失败: {result.error_message}"}}
+            return
+
+        context['df_merged'] = result.data
+        yield {'type': 'step_complete', 'data': {'step_id': '3', 'status': 'success', 'row_count': result.row_count, 'execution_time_ms': result.execution_time_ms}}
+
+        # Step 4: 写入Excel
+        yield {'type': 'step_start', 'data': {'step_id': '4', 'tool': 'write_excel', 'description': '保存结果到Excel'}}
+
+        output_path = plan.get('output_path', '/tmp/output.xlsx')
+        result = ExcelTool.write(context['df_merged'], output_path)
+        total_time += result.execution_time_ms
+
+        if not result.success:
+            yield {'type': 'step_complete', 'data': {'step_id': '4', 'status': 'error', 'error_message': result.error_message}}
+            yield {'type': 'error', 'data': {'message': f"保存Excel失败: {result.error_message}"}}
+            return
+
+        yield {'type': 'step_complete', 'data': {'step_id': '4', 'status': 'success', 'row_count': result.row_count, 'execution_time_ms': result.execution_time_ms}}
+
+        # 步骤3: 返回最终结果
+        final_df = context.get('df_merged')
+
+        # 获取输出文件路径
+        output_path = plan.get('output_path', '')
+
+        if final_df is not None and isinstance(final_df, pd.DataFrame):
+            # 生成图表
+            chart_base64 = self._generate_chart(final_df)
+
             yield {
                 'type': 'final',
                 'data': {
-                    'sql': '',  # 可以收集所有SQL步骤
-                    'row_count': len(df),
-                    'columns': df.columns.tolist(),
-                    'data': df.head(100).to_dict(orient='records'),  # 限制返回行数
-                    'visualization': {
-                        'chart_type': viz_config.chart_type,
-                        'title': viz_config.title,
-                        'x_axis': viz_config.x_axis,
-                        'y_axis': viz_config.y_axis
-                    },
+                    'status': 'success',
+                    'row_count': len(final_df),
+                    'columns': final_df.columns.tolist(),
+                    'data': final_df.head(100).to_dict(orient='records'),
+                    'output_file': output_path,
                     'chart_png_base64': chart_base64,
                     'execution_summary': {
                         'total_steps': len(steps),
-                        'successful_steps': sum(1 for r in step_results.values() if r.status == 'success'),
-                        'total_execution_time_ms': sum(r.execution_time_ms for r in step_results.values())
+                        'total_execution_time_ms': total_time
                     }
                 }
             }
         else:
             yield {
-                'type': 'error',
+                'type': 'final',
                 'data': {
-                    'message': '未获得有效的最终结果'
+                    'status': 'success',
+                    'message': '任务完成',
+                    'execution_summary': {
+                        'total_steps': len(steps),
+                        'total_execution_time_ms': total_time
+                    }
                 }
             }
 
+    def _generate_chart(self, df: pd.DataFrame) -> Optional[str]:
+        """生成图表"""
+        try:
+            if df.empty or len(df.columns) < 2:
+                return None
+
+            plt.clf()
+            plt.close('all')
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+            # 简单柱状图
+            numeric_cols = df.select_dtypes(include=['number']).columns
+            if len(numeric_cols) > 0:
+                y_col = numeric_cols[0]
+                x_col = df.columns[0] if df.columns[0] != y_col else df.columns[1]
+
+                if x_col in df.columns and y_col in df.columns:
+                    df.head(20).plot(x=x_col, y=y_col, kind='bar', ax=ax)
+                    ax.set_title('数据分析')
+                    plt.xticks(rotation=45, ha='right')
+                    plt.tight_layout()
+
+                    buffer = io.BytesIO()
+                    fig.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
+                    buffer.seek(0)
+                    image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
+                    plt.close(fig)
+                    return image_base64
+
+            return None
+        except Exception as e:
+            print(f"[Chart Error] {e}")
+            return None
+
 
 # 向后兼容的简化接口
-async def analyze_sql_query(question: str, session_id: Optional[str] = None) -> AsyncGenerator[Dict[str, Any], None]:
-    """
-    简化接口：分析SQL查询（流式）
-
-    使用示例：
-        async for chunk in analyze_sql_query("统计各科室CT检查数量"):
-            print(chunk)
-    """
+async def analyze_sql_query(question: str, session_id: Optional[str] = None):
+    """简化接口"""
     agent = SQLAnalysisAgent()
     async for event in agent.analyze(question, session_id):
         yield event

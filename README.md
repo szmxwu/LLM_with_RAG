@@ -75,7 +75,7 @@
 |-------|------|----------|
 | **KnowledgeAgent** | 医学知识检索问答 | 疾病影像学表现、扫描技术规范、鉴别诊断 |
 | **RadiologyAgent** | 放射质控分析 | 诊断一致性检查、患者病史分析、阅片指导 |
-| **SQLAnalysisAgent** | 数据智能分析 | 检查量统计、收入分析、效率评估 |
+| **SQLAnalysisAgent** | 数据智能分析 | 检查量统计、收入分析、Excel关联数据库查询 |
 
 ---
 
@@ -103,8 +103,13 @@ LLM_with_RAG_v2/
 │   ├── ragflow_tools.py      # RAGFlow 检索工具
 │   └── sql_agent.py          # SQL 生成与执行工具
 ├── prompt/                    # Prompt 模板
-│   └── probe_prompt.txt      # 病例关键词生成 prompt
+│   ├── probe_prompt.txt      # 病例关键词生成 prompt
+│   └── sql_prompt.json       # SQL 数据库结构提示词
 ├── static/                    # 静态资源（Swagger UI）
+├── cache/                     # 缓存目录
+│   └── sql_analysis/         # SQL分析结果文件缓存
+├── tests/                     # 测试脚本
+│   └── test_agents/          # Agent测试脚本
 ├── legacy/                    # 兼容模块（独立运行）
 ├── sql_executor_subprocess.py # SQL 子进程执行器
 ├── main.py                    # 应用入口
@@ -551,16 +556,17 @@ async function analyzePatient(history, modality, part) {
 
 ### 6. SQL 数据分析接口（/v2/sql/analyze）
 
-**接口描述**：自然语言转 SQL，执行数据分析并生成图表。
+**接口描述**：自然语言转 SQL，支持 Excel 文件上传关联数据库查询，执行数据分析并生成图表。
 
-**请求方式**：`POST`
+**请求方式**：`POST`（multipart/form-data）
 
 **请求参数**：
 
 ```typescript
 interface SQLAnalysisRequest {
-  question: string;            // 自然语言问题
-  session_id?: string;
+  question: string;            // 自然语言问题（必填）
+  session_id?: string;         // 会话ID（可选）
+  file?: File;                 // Excel/CSV文件（可选）
 }
 ```
 
@@ -571,21 +577,39 @@ interface SQLAnalysisRequest {
 - `step_start`: 步骤开始
 - `step_complete`: 步骤完成
 - `analysis`: 分析中
-- `final`: 最终结果（包含数据和图表）
+- `final`: 最终结果（包含数据、图表、下载链接）
+
+**文件上传说明**：
+
+1. **上传文件**：支持 `.xlsx`、`.xls`、`.csv` 格式
+2. **关联字段**：Excel 需包含 `AccNo`（检查号）列用于关联数据库
+3. **查询逻辑**：系统自动将 Excel 的 AccNo 与数据库关联，查询检查时间、报告结论等
+4. **结果保留**：未匹配到数据库的记录保留，新列显示为空白
+5. **下载结果**：最终文件可通过 `download_url` 下载
+
+**前端实现示例（文件上传）**：
 
 ```javascript
-async function analyzeSQL(question) {
+async function analyzeSQLWithFile(question, file) {
+  const formData = new FormData();
+  formData.append('question', question);
+  formData.append('session_id', 'session-' + Date.now());
+  if (file) {
+    formData.append('file', file);
+  }
+
   const response = await fetch('http://localhost:6082/v2/sql/analyze', {
     method: 'POST',
     headers: {
       'Authorization': 'Basic ' + btoa('any:password'),
-      'Content-Type': 'application/json'
+      // 注意：Content-Type 不要设置，浏览器会自动设置 multipart/form-data
     },
-    body: JSON.stringify({ question })
+    body: formData
   });
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  let downloadUrl = null;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -613,11 +637,56 @@ async function analyzeSQL(question) {
             // 显示数据和图表
             displayChart(event.data.chart_png_base64);
             displayTable(event.data.data);
+            // 保存下载链接
+            downloadUrl = event.data.download_url;
+            if (downloadUrl) {
+              showDownloadButton(downloadUrl);
+            }
             break;
         }
       }
     }
   }
+}
+
+// 下载结果文件
+async function downloadResult(downloadUrl) {
+  const response = await fetch(`http://localhost:6082${downloadUrl}`, {
+    headers: {
+      'Authorization': 'Basic ' + btoa('any:password')
+    }
+  });
+
+  if (response.ok) {
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '分析结果.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  }
+}
+```
+
+**无文件上传示例**：
+
+```javascript
+async function analyzeSQL(question) {
+  const formData = new FormData();
+  formData.append('question', question);
+
+  const response = await fetch('http://localhost:6082/v2/sql/analyze', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Basic ' + btoa('any:password'),
+    },
+    body: formData
+  });
+
+  // 处理方式同上...
 }
 ```
 
@@ -737,6 +806,16 @@ async function getThinkingModes() {
    - 诊断匹配等关键决策使用 `deep_think` 模式
 
 5. **会话隔离**：多用户场景下，建议为每个用户分配唯一的 `user_id`，避免会话混淆。
+
+6. **SQL Agent 文件上传**：
+   - Excel 文件必须包含 `AccNo` 列用于关联数据库
+   - 上传文件大小建议不超过 10MB
+   - 结果文件在服务器缓存目录保存 24 小时
+   - 支持通过 `download_url` 下载合并后的结果文件
+
+7. **缓存目录位置**：
+   - SQL 分析结果文件保存在 `cache/sql_analysis/` 目录
+   - 定期清理过期文件以释放磁盘空间
 
 ---
 
