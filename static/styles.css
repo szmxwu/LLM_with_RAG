@@ -1,0 +1,123 @@
+body {
+    display: flex;
+    height: 100vh;
+    margin: 0;
+    font-family: Arial, sans-serif;
+}
+
+.container {
+    display: flex;
+    width: 100%;
+}
+
+.sidebar {
+    width: 25%;
+    background-color: #f4f4f4;
+    padding: 20px;
+    box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+    transition: width 0.3s ease;
+    position: relative;
+}
+
+.logo {
+    width: 100px;
+    margin-bottom: 20px;
+}
+
+.resize-handle {
+    position: absolute;
+    top: 0;
+    right: 0; /* 确保resize-handle在sidebar的右边缘 */
+    width: 10px; /* 增加宽度，使其更容易捕捉到 */
+    height: 100%;
+    background-color: transparent; /* 设置为透明，不遮挡sidebar内容 */
+    cursor: col-resize; /* 设置鼠标样式为列宽调整图标 */
+    z-index: 1; /* 确保resize-handle在其他元素之上 */
+}
+
+.resize-handle:hover {
+    background-color: rgba(0, 0, 0, 0.1); /* 鼠标悬停时显示一个半透明的背景色 */
+}
+
+.chat-area {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+
+.chat-log {
+    flex-grow: 1;
+    padding: 20px;
+    overflow-y: auto;
+    background-color: #fff;
+}
+
+.input-area {
+    display: flex;
+    padding: 10px;
+    background-color: #f4f4f4;
+}
+
+#user-input {
+    flex-grow: 1;
+    padding: 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    resize: none; /* Prevent resizing */
+    height: 50px; /* Set a default height */
+}
+
+#send-button {
+    padding: 10px 20px;
+    margin-left: 10px;
+    background-color: #007bff;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+#send-button:hover {
+    background-color: #0056b3;
+}
+
+.user-message, .assistant-message {
+    display: flex;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.user-message img, .assistant-message img {
+    width: 40px;
+    height: 40px;
+    margin-right: 10px;
+}
+
+.user-message .text {
+    background-color: #e1f5fe;
+    padding: 10px;
+    border-radius: 10px;
+    width: 90%; 
+}
+
+.assistant-message .text {
+    background-color: #e8eaf6;
+    padding: 10px;
+    border-radius: 10px;
+    width: 100%; 
+}
+
+.file-viewer {
+    overflow: auto;
+    height: 80vh; /* Adjust as needed */
+    cursor: grab;
+}
+
+.file-viewer.active {
+    cursor: grabbing;
+}
+
+.pdf-page {
+    margin-bottom: 20px;
+}

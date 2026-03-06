@@ -1,0 +1,144 @@
+
+
++===========================================================================================================================================================================================+
+
+
+DEPRECATED: this command (`check`) has been DEPRECATED, and will be unsupported beyond 01 June 2024.
+
+
+We highly encourage switching to the new `scan` command which is easier to use, more powerful, and can be set up to mimic the deprecated command if required.
+
+
++===========================================================================================================================================================================================+
+
+
++==============================================================================+
+
+                                   /$$$$$$            /$$
+                                  /$$__  $$          | $$
+               /$$$$$$$  /$$$$$$ | $$  \__//$$$$$$  /$$$$$$   /$$   /$$
+              /$$_____/ |____  $$| $$$$   /$$__  $$|_  $$_/  | $$  | $$
+             |  $$$$$$   /$$$$$$$| $$_/  | $$$$$$$$  | $$    | $$  | $$
+              \____  $$ /$$__  $$| $$    | $$_____/  | $$ /$$| $$  | $$
+              /$$$$$$$/|  $$$$$$$| $$    |  $$$$$$$  |  $$$$/|  $$$$$$$
+             |_______/  \_______/|__/     \_______/   \___/   \____  $$
+                                                              /$$  | $$
+                                                             |  $$$$$$/
+      by safetycli.com                                        \______/
+
++==============================================================================+
+
+ ANNOUNCEMENTS
+
+  * Warning: fastapi, uvicorn, pydantic, pydantic-settings, python-dotenv, 
+    python-multipart, langchain, langchain-core, langchain-openai, langchain- 
+    community, langgraph, openai, pandas, numpy, sqlalchemy, pyyaml, ragflow- 
+    sdk, pypdf2, pymupdf, python-pptx, python-docx, pillow, beautifulsoup4, 
+    json-repair, httpx, aiofiles, tenacity, pytest, pytest-asyncio and pytest- 
+    cov are unpinned. Safety by default does not report on potential 
+    vulnerabilities in unpinned packages. It is recommended to pin your 
+    dependencies unless this is a library meant for distribution. To learn more 
+    about reporting these, specifier range handling, and options for scanning 
+    unpinned packages visit https://docs.pyup.io/docs/safety-range-specs 
+
++==============================================================================+
+
+ REPORT 
+
+  Safety v3.7.0 is scanning for Vulnerabilities...
+  Scanning dependencies in your files:
+
+  -> requirements.txt
+
+  Using open-source vulnerability database
+  Found and scanned 30 packages
+  Timestamp 2026-03-05 09:59:54
+  0 vulnerabilities reported
+  13 vulnerabilities ignored
+
++==============================================================================+
+ VULNERABILITIES FOUND
++==============================================================================+
+
+-> Warning: 5 known vulnerabilities match the pillow versions that could be 
+   installed from your specifier: Pillow>=10.0.0 (unpinned). These 
+   vulnerabilities are not reported by default. To report these vulnerabilities 
+   set 'ignore-unpinned-requirements' to False under 'security' in your policy 
+   file. See https://docs.pyup.io/docs/safety-20-policy-file for more 
+   information. 
+   It is recommended to pin your dependencies unless this is a library meant 
+   for distribution. To learn more about reporting these, specifier range 
+   handling, and options for scanning unpinned packages visit 
+   https://docs.pyup.io/docs/safety-range-specs 
+-> Warning: 1 known vulnerability matches the python-pptx versions that could 
+   be installed from your specifier: python-pptx>=0.6.21 (unpinned). These 
+   vulnerabilities are not reported by default. To report these vulnerabilities 
+   set 'ignore-unpinned-requirements' to False under 'security' in your policy 
+   file. See https://docs.pyup.io/docs/safety-20-policy-file for more 
+   information. 
+   It is recommended to pin your dependencies unless this is a library meant 
+   for distribution. To learn more about reporting these, specifier range 
+   handling, and options for scanning unpinned packages visit 
+   https://docs.pyup.io/docs/safety-range-specs 
+-> Warning: 1 known vulnerability matches the pypdf2 versions that could be 
+   installed from your specifier: PyPDF2>=3.0.0 (unpinned). These 
+   vulnerabilities are not reported by default. To report these vulnerabilities 
+   set 'ignore-unpinned-requirements' to False under 'security' in your policy 
+   file. See https://docs.pyup.io/docs/safety-20-policy-file for more 
+   information. 
+   It is recommended to pin your dependencies unless this is a library meant 
+   for distribution. To learn more about reporting these, specifier range 
+   handling, and options for scanning unpinned packages visit 
+   https://docs.pyup.io/docs/safety-range-specs 
+-> Warning: 1 known vulnerability matches the langchain-community versions that 
+   could be installed from your specifier: langchain-community>=0.3.0 
+   (unpinned). These vulnerabilities are not reported by default. To report 
+   these vulnerabilities set 'ignore-unpinned-requirements' to False under 
+   'security' in your policy file. See 
+   https://docs.pyup.io/docs/safety-20-policy-file for more information. 
+   It is recommended to pin your dependencies unless this is a library meant 
+   for distribution. To learn more about reporting these, specifier range 
+   handling, and options for scanning unpinned packages visit 
+   https://docs.pyup.io/docs/safety-range-specs 
+-> Warning: 3 known vulnerabilities match the langchain-core versions that 
+   could be installed from your specifier: langchain-core>=0.3.0 (unpinned). 
+   These vulnerabilities are not reported by default. To report these 
+   vulnerabilities set 'ignore-unpinned-requirements' to False under 'security' 
+   in your policy file. See https://docs.pyup.io/docs/safety-20-policy-file for 
+   more information. 
+   It is recommended to pin your dependencies unless this is a library meant 
+   for distribution. To learn more about reporting these, specifier range 
+   handling, and options for scanning unpinned packages visit 
+   https://docs.pyup.io/docs/safety-range-specs 
+-> Warning: 2 known vulnerabilities match the python-multipart versions that 
+   could be installed from your specifier: python-multipart>=0.0.9 (unpinned). 
+   These vulnerabilities are not reported by default. To report these 
+   vulnerabilities set 'ignore-unpinned-requirements' to False under 'security' 
+   in your policy file. See https://docs.pyup.io/docs/safety-20-policy-file for 
+   more information. 
+   It is recommended to pin your dependencies unless this is a library meant 
+   for distribution. To learn more about reporting these, specifier range 
+   handling, and options for scanning unpinned packages visit 
+   https://docs.pyup.io/docs/safety-range-specs 
+
+
++==============================================================================+
+
+ Scan was completed. 0 vulnerabilities were reported. 13 vulnerabilities from 6 
+ packages were ignored. 
+
++==============================================================================+
+
+
++===========================================================================================================================================================================================+
+
+
+DEPRECATED: this command (`check`) has been DEPRECATED, and will be unsupported beyond 01 June 2024.
+
+
+We highly encourage switching to the new `scan` command which is easier to use, more powerful, and can be set up to mimic the deprecated command if required.
+
+
++===========================================================================================================================================================================================+
+
+
